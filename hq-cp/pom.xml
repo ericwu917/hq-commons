@@ -18,9 +18,9 @@
 
   <repositories>
     <repository>
-      <id>umf-nexus</id>
-      <name>UMF Nexus Repository</name>
-      <url>https://nexus.umftech.com/nexus/repository/maven-public/</url>
+      <id>github-repo</id>
+      <name>GitHub OWNER Apache Maven Packages</name>
+      <url>https://maven.pkg.github.com/alphapay/hq-commons</url>
       <releases><enabled>true</enabled></releases>
       <snapshots><enabled>true</enabled></snapshots>
     </repository>
@@ -28,15 +28,10 @@
 
   <distributionManagement>
     <repository>
-      <id>umf-releases</id>
-      <name>Nexus-releases-repositories</name>
-      <url>https://nexus.umftech.com/nexus/repository/maven-releases/</url>
+      <id>github-release</id>
+      <name>GitHub OWNER Apache Maven Packages</name>
+      <url>https://maven.pkg.github.com/alphapay/hq-commons</url>
     </repository>
-    <snapshotRepository>
-      <id>umf-snapshots</id>
-      <name>Nexus-snapshots-repositories</name>
-      <url>https://nexus.umftech.com/nexus/repository/maven-snapshots/</url>
-    </snapshotRepository>
   </distributionManagement>
 
   <dependencies>
