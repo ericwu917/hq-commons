@@ -1,13 +1,17 @@
 # This workflow will build a Java project with Maven
 # For more information see: https://help.github.com/actions/language-and-framework-guides/building-and-testing-java-with-maven
 
-name: Java CI with Maven
+name: deploy package to github on master
 
 on:
   workflow_dispatch:
+  push:
+    branches: [ master ]
 
 jobs:
-  build:
+  deploy:
+    # skip job if commit log contains `[skip ci]`
+    if: "!contains(github.event.commits[0].message, '[skip ci]')"
 
     runs-on: ubuntu-latest
 
@@ -20,8 +24,8 @@ jobs:
         server-id: github-release
         server-username: MAVEN_USERNAME
         server-password: MAVEN_PASSWORD
-    - name: Build with Maven
-      run: mvn -B -DskipTests deploy
+    - name: release with Maven
+      run: mvn -B -DskipTests release:clean release:prepare release:perform -DscmCommentPrefix="[skip ci][maven release plugin]"
       env:
           MAVEN_USERNAME: alphapay-release
           MAVEN_PASSWORD: ${{ secrets.MAVEN_DEPLOY_TOKEN }}

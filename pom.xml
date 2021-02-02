@@ -11,7 +11,7 @@
 
   <modules>
     <module>hq-utils</module>
-    <module>hq-cp</module>
+<!--    <module>hq-cp</module>-->
   </modules>
   
 </project>
