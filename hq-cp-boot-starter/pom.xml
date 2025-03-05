@@ -5,11 +5,11 @@
   <parent>
     <groupId>io.hqwu.commons</groupId>
     <artifactId>hq-commons-parent</artifactId>
-    <version>1.4.0</version>
+    <version>1.4.1-SNAPSHOT</version>
   </parent>
 
   <artifactId>hq-cp-boot-starter</artifactId>
-  <version>1.4.0</version>
+  <version>1.4.1-SNAPSHOT</version>
 
   <dependencies>
 
