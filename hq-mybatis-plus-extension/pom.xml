@@ -3,23 +3,23 @@
   <parent>
     <artifactId>hq-commons-parent</artifactId>
     <groupId>io.hqwu.commons</groupId>
-    <version>1.4.0-SNAPSHOT</version>
+    <version>1.4.0</version>
   </parent>
   <modelVersion>4.0.0</modelVersion>
 
   <artifactId>hq-mybatis-plus-extension</artifactId>
-  <version>1.4.0-SNAPSHOT</version>
+  <version>1.4.0</version>
 
   <dependencies>
     <dependency>
       <groupId>io.hqwu.commons</groupId>
       <artifactId>hq-utils</artifactId>
-      <version>1.4.0-SNAPSHOT</version>
+      <version>1.4.0</version>
     </dependency>
     <dependency>
       <groupId>io.hqwu.commons</groupId>
       <artifactId>hq-spring-webmvc</artifactId>
-      <version>1.4.0-SNAPSHOT</version>
+      <version>1.4.0</version>
     </dependency>
     <dependency>
       <groupId>com.baomidou</groupId>
@@ -70,7 +70,7 @@
     <dependency>
       <groupId>io.hqwu.commons</groupId>
       <artifactId>hq-cp-boot-starter</artifactId>
-      <version>1.4.0-SNAPSHOT</version>
+      <version>1.4.0</version>
       <scope>test</scope>
     </dependency>
     <dependency>
