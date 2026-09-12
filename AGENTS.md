@@ -50,15 +50,14 @@ mvn verify                               # 含 JaCoCo 覆盖率门（见下）
 
 ## 分支与发布
 
-- **remote**：`taige@github` = `taige/hq-commons`（真源，所有本地分支 track 它，GitHub Actions 在这跑）；`ericwu917@github`：独立仓，不发布。**没有 `origin`**：全局 worktree hook 找不到 `origin/develop` 会退到当前 HEAD，开 worktree 前先 `git fetch taige@github && git checkout develop && git pull`。
-- **`gh` 全局 active 账号是 `ericwu917`（其他仓都用它），本仓写操作需要 `taige`，但不切账号**：
-  - `git push`：本仓已配仓库级 credential helper 固定取 taige 的 token（`git config --local --add credential.https://github.com.helper '' && git config --local --add credential.https://github.com.helper '!f(){ echo username=taige; echo "password=$(gh auth token --user taige)"; }; f'`，新 clone 要重配）。没配时 push 报 `could not read Password for 'https://taige@github.com'`（实测，不是 403）。
-  - `gh pr` / `gh run` / `gh api`：单条命令前缀 `GH_TOKEN=$(gh auth token --user taige)`。
-  - 不要 `gh auth switch`；万一切了，用完切回 `ericwu917`。
+- **remote**：`ericwu917@github` = `ericwu917/hq-commons` —— **真源**（2026-09-12 起），Actions 与发布都在这；下游 `payment26-backend` 也在这个账号下。`taige@github` = `taige/hq-commons`：旧主仓，**账号被 GitHub 以 billing 问题锁定、Actions 一步都跑不了**（`The job was not started because your account is locked due to a billing issue`，与用量无关：public 仓分钟数免费，且锁定前 5 个月零运行），原样留着不动，别往它推。`ali_codeup`：云效 Codeup 镜像，落后。
+- `gh` 与 `git push` 都用全局 active 账号 `ericwu917`，**本仓不需要切账号**（历史上为 taige 配的仓库级 credential helper 已删除）。
+- **没有 `origin`**：全局 worktree hook 找不到 `origin/develop` 会退到当前 HEAD，开 worktree 前先 `git fetch ericwu917@github && git checkout develop && git pull`。本仓已设 `gh repo set-default ericwu917/hq-commons`、`remote.pushDefault` / `checkout.defaultRemote` = `ericwu917@github`。
 - **版本现状（2026-09-12）**：`develop` 是当前线（1.17.0-SNAPSHOT）。**最后一次 release 是 v1.4.0（2025-03-06）**，`master` 停在 `1.4.1-SNAPSHOT`；**1.5–1.16 不存在**——5c67391（2026-01-14）随 JDK 17 升级把版本号从 `1.4.1-SNAPSHOT` 直接改成 `1.17.0-SNAPSHOT`，之后只发过 SNAPSHOT，下游全在吃它。下次 release 就是 1.17.0，develop → master 会是跨 1.4 → 1.17 的大合并。
 - **发布全靠 GitHub Actions，不在本地跑 release**：`feature/*` → `develop`（推送触发 `maven-snapshot.yml`：SNAPSHOT 发 GitHub Packages + Aliyun 云效）→ 把 develop 合到 `master` 推上去（触发 `maven-release.yml`：job 1 `release:prepare/perform` 打 tag `v<version>`、bump 下一个 SNAPSHOT、发 GitHub Packages；job 2 调 `maven-release-aliyun.yml` 按 tag 发 Aliyun）→ 手动 dispatch `maven-release-merge-to-develop.yml` 把 master ff-merge 回 develop。**Aliyun 那步失败只重跑它**：Re-run failed jobs，或手动 dispatch `maven-release-aliyun.yml` 填同一个 tag；别重跑整个 release，那会再切一个版本。
-- 发布产物两处：GitHub Packages（pom 的 distributionManagement，含 sources jar）与 Aliyun 云效 packages（workflow 里用 `-Dalt*DeploymentRepository` 指过去）。业务仓从 Aliyun 拉。**Aliyun 有意不发 sources**：两条 Aliyun 步骤都是 `package deploy:deploy` 而非完整 `deploy`，就是为了跳过 verify 阶段的 source plugin，别"修"成 `deploy`。
+- 发布产物两处：GitHub Packages（`maven.pkg.github.com/ericwu917/hq-commons`，pom 的 distributionManagement，含 sources jar）与 Aliyun 云效 packages（workflow 里用 `-Dalt*DeploymentRepository` 指过去）。业务仓从 Aliyun 拉。**Aliyun 有意不发 sources**：两条 Aliyun 步骤都是 `package deploy:deploy` 而非完整 `deploy`，就是为了跳过 verify 阶段的 source plugin，别"修"成 `deploy`。
 - **SNAPSHOT 不是终点**：下游要打 release tag 之前，本仓得先发 release 版本。
+- **CI 上 `hq-cp` 的两个测试是已知 flaky**，重跑即过，别当成真失败：`HqcpTest#testGetConnectionLIFO`（拿到未初始化的 EasyMock 对象）与 `HqcpTest#testCheckoutTimeoutWaitForever`（`No suitable driver found for jdbc:mock`）。taige 仓历史上的 snapshot run 就是"失败→重跑→成功"的规律。
 
 ## 编码约定
 
