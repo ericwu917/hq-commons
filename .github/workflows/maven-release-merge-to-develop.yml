@@ -32,7 +32,7 @@ jobs:
           git fetch origin develop
           git checkout develop
           git merge --ff origin/master
-          git push "https://${GITHUB_ACTOR}:${GITHUB_TOKEN}@github.com/taige/hq-commons.git" develop
+          git push "https://${GITHUB_ACTOR}:${GITHUB_TOKEN}@github.com/${{ github.repository }}.git" develop
         env:
           GITHUB_ACTOR: ${{ secrets.GITHUB_ACTOR }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

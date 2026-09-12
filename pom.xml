@@ -32,8 +32,8 @@
   </properties>
 
   <scm>
-    <developerConnection>scm:git:https://github.com/taige/hq-commons.git</developerConnection>
-    <url>https://github.com/taige/hq-commons</url>
+    <developerConnection>scm:git:https://github.com/ericwu917/hq-commons.git</developerConnection>
+    <url>https://github.com/ericwu917/hq-commons</url>
     <tag>HEAD</tag>
   </scm>
 
@@ -55,12 +55,12 @@
     <repository>
       <id>github</id>
       <name>Github Packages</name>
-      <url>https://maven.pkg.github.com/taige/hq-commons</url>
+      <url>https://maven.pkg.github.com/ericwu917/hq-commons</url>
     </repository>
     <snapshotRepository>
       <id>github</id>
       <name>Github Packages</name>
-      <url>https://maven.pkg.github.com/taige/hq-commons</url>
+      <url>https://maven.pkg.github.com/ericwu917/hq-commons</url>
     </snapshotRepository>
   </distributionManagement>
 
