@@ -46,6 +46,8 @@ mvn verify                               # 含 JaCoCo 覆盖率门（见下）
 
 **测试栈**：JUnit 5 + Mockito 为主，hq-cp 里有 EasyMock，邮件用 Greenmail。集成测试类名以 `IntTest` 结尾、默认不跑。日志级别由 `test.logger.level` 控制（默认 WARN）。
 
+**写 hq-cp 测试的约定**：`MockJDBCDriver` 是 JVM 级单例，全部测试类共用；改了它的状态（`setAcceptUrl` / `setMockJDBCAnswer` / `setConnection`）**必须在 `@AfterAll` / `@AfterEach` 里 `disable()` 还原**，否则后面的类通过 `DriverManager` 取 `jdbc:mock` 会失败。
+
 **JaCoCo 门（`mvn verify` 强制，不许静默调低）**：Bundle 指令 90% / 分支 85%；Package 行 85%；Class 行 80%、漏测复杂度路径 ≤ 20。排除 `**/entity/**`、`**/dto/**`、`**/enums/**`、`**/config/**`、`**/*Exception.class`、`**/*Application.class`。模块级额外排除只走 `<excludes combine.children="append">`（现有：hq-cp `OracleUtil`、hq-mybatis-plus-extension `CodeGenerator`），不改父 pom。
 
 ## 分支与发布
@@ -57,7 +59,7 @@ mvn verify                               # 含 JaCoCo 覆盖率门（见下）
 - **发布全靠 GitHub Actions，不在本地跑 release**：`feature/*` → `develop`（推送触发 `maven-snapshot.yml`：SNAPSHOT 发 GitHub Packages + Aliyun 云效）→ 把 develop 合到 `master` 推上去（触发 `maven-release.yml`：job 1 `release:prepare/perform` 打 tag `v<version>`、bump 下一个 SNAPSHOT、发 GitHub Packages；job 2 调 `maven-release-aliyun.yml` 按 tag 发 Aliyun）→ 手动 dispatch `maven-release-merge-to-develop.yml` 把 master ff-merge 回 develop。**Aliyun 那步失败只重跑它**：Re-run failed jobs，或手动 dispatch `maven-release-aliyun.yml` 填同一个 tag；别重跑整个 release，那会再切一个版本。
 - 发布产物两处：GitHub Packages（`maven.pkg.github.com/ericwu917/hq-commons`，pom 的 distributionManagement，含 sources jar）与 Aliyun 云效 packages（workflow 里用 `-Dalt*DeploymentRepository` 指过去）。业务仓从 Aliyun 拉。**Aliyun 有意不发 sources**：两条 Aliyun 步骤都是 `package deploy:deploy` 而非完整 `deploy`，就是为了跳过 verify 阶段的 source plugin，别"修"成 `deploy`。
 - **SNAPSHOT 不是终点**：下游要打 release tag 之前，本仓得先发 release 版本。
-- **CI 上 `hq-cp` 的两个测试是已知 flaky**，重跑即过，别当成真失败：`HqcpTest#testGetConnectionLIFO`（拿到未初始化的 EasyMock 对象）与 `HqcpTest#testCheckoutTimeoutWaitForever`（`No suitable driver found for jdbc:mock`）。taige 仓历史上的 snapshot run 就是"失败→重跑→成功"的规律。
+- **CI 挂了先查，别靠重跑**：历史上 hq-cp 的 snapshot run 常年"失败→重跑→成功"，查下去是三个真 bug（测试间污染 JVM 级单例驱动、BeanConverter 装箱属性丢失、测试断言依赖连接创建顺序），2026-09-13 已修。surefire 的 `runOrder` 因此钉成 `alphabetical`（见父 pom 注释），别当噪音删掉。
 
 ## 编码约定
 
