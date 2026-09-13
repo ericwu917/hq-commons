@@ -637,6 +637,7 @@ public class HqcpTest {
 
         connPool = new Hqcp(config);
         final Connection conn = connPool.getConnection();
+        final String connId = conn.toString(); //在连接可用时记录标识，归还后的 handle 不能再调用
         Connection[] conns = new Connection[4]; //max connections is 5
         for (int i = 0; i < conns.length; i++) {
             conns[i] = connPool.getConnection();
@@ -656,7 +657,9 @@ public class HqcpTest {
         }).start();
         cyclicBarrier.await();
         Connection conn6 = connPool.getConnection();
-        assertEquals(conn6, mockConnection);
+        // 拿回的应当就是另一线程释放的那条连接；不比对底层是哪个 mock 实例，
+        // 因为 Monitor 补足 minConnections 的时机会改变 mock 的消费顺序。
+        assertEquals(connId, conn6.toString(), "等待后应拿到被释放的那条连接");
 
         for (Connection _conn : conns) {
             _conn.close();
@@ -751,16 +754,20 @@ public class HqcpTest {
             Thread.sleep(10);
         }
 
+        // 不断言连接底层是哪个 mock 实例：Monitor 可能在主线程取连接前就补足 minConnections，
+        // 这会改变两个 mock 被消费的顺序（CI 上偶发）。这里只验 LIFO 语义本身。
+        // 标识在连接可用时取（`HQCP#<池号>#<连接号>{...}`），归还后的 handle 不能再调用。
         Connection conn1 = connPool.getConnection();
-        assertEquals(conn1, mockConnection);
+        String id1 = conn1.toString();
         Connection conn2 = connPool.getConnection();
-        assertEquals(conn2, mockConnection2);
+        String id2 = conn2.toString();
+        assertNotEquals(id1, id2, "两次获取应拿到不同的连接");
 
         conn1.close();
-        conn2.close(); //mockConnection2 is LI
+        conn2.close(); //conn2 is LI
 
         Connection conn3 = connPool.getConnection();
-        assertEquals(conn3, mockConnection2); //mockConnection2 is FO
+        assertEquals(id2, conn3.toString(), "LIFO：最后归还的连接应最先被取出"); //conn2 is FO
 
         conn3.close();
     }
