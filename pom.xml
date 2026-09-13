@@ -235,6 +235,8 @@
             <!-- 排除集成测试类 -->
             <exclude>**/*IntTest.java</exclude>
           </excludes>
+          <!-- 默认的 filesystem 顺序在 macOS 与 Linux 上不同，会让测试类间的顺序依赖只在 CI 暴露；钉死为确定顺序 -->
+          <runOrder>alphabetical</runOrder>
         </configuration>
       </plugin>
       <plugin>

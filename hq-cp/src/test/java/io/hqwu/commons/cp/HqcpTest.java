@@ -45,6 +45,9 @@ public class HqcpTest {
     private IMocksControl mocksControl;
     @BeforeEach
     public void setUp() throws SQLException {
+        // MockJDBCDriver 是 JVM 级单例，acceptUrl / answer 会被别的测试类改写；
+        // 本类的连接都靠 DriverManager 解析 jdbc:mock，所以每个用例前先复位驱动状态。
+        MockJDBCDriver.getInstance().disable();
         mocksControl = createNiceControl();
         mockConnection = mocksControl.createMock(MockConnection.class);
         mockConnection.close();

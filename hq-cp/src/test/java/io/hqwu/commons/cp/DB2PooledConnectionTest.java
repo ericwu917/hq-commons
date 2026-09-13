@@ -26,6 +26,15 @@ class DB2PooledConnectionTest {
         MockJDBCDriver.getInstance().setAcceptUrl("jdbc:db2");
     }
 
+    /**
+     * MockJDBCDriver 是 JVM 级单例，acceptUrl 改了必须还原，
+     * 否则后续测试类通过 DriverManager 取 jdbc:mock 会报 "No suitable driver found"。
+     */
+    @AfterAll
+    static void restoreDriver() throws SQLException {
+        MockJDBCDriver.getInstance().disable();
+    }
+
     @BeforeEach
     void setUp() throws Exception {
         // 配置 DB2 数据源
