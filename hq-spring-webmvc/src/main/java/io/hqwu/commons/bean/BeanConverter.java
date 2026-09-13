@@ -358,10 +358,17 @@ public class BeanConverter implements ApplicationContextAware {
                     synchronized (this) {
                         settersByCopier.add(targSetterName);
                         if (targSetterName instanceof String) {
-                            // remove properties mapping because handled by BeanCopier
                             PropertyDescriptor propertyDescriptor =
                                     getPropertyDescriptor(targetBean, (String) targSetterName, targetClass);
-                            nameMapping.remove(propertyDescriptor);
+                            PropertyDescriptor srcPropDesc = nameMapping.get(propertyDescriptor);
+                            // `obj.equals(origValue)` 只说明 converter 没改值，不代表不带 converter 的 BeanCopier 也会拷它：
+                            // 后者仅在类型可直接赋值时才拷，靠自动装箱/拆箱的（如 Boolean -> boolean）会被静默跳过。
+                            // 所以只有类型确实可直接赋值时，才能把该属性交给 BeanCopier、从 nameMapping 移除。
+                            if (srcPropDesc != null
+                                    && propertyDescriptor.getPropertyType().isAssignableFrom(srcPropDesc.getPropertyType())) {
+                                // remove properties mapping because handled by BeanCopier
+                                nameMapping.remove(propertyDescriptor);
+                            }
                         }
                     }
                 }
