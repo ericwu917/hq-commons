@@ -6,6 +6,8 @@
       <pattern>${CONSOLE_LOG_FMT}</pattern>
     </encoder>
   </appender>
+  <!-- RestClientLoggingInterceptor 的 body 日志分支只在 debug 下走，探针要覆盖它 -->
+  <logger name="boot4-probe.RestClient" level="DEBUG"/>
   <root level="${test.logger.level}">
     <appender-ref ref="STDOUT"/>
   </root>

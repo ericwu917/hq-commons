@@ -7,13 +7,16 @@ import io.hqwu.commons.util.LoggerFactory;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpMethod;
 import org.springframework.http.HttpRequest;
+import org.springframework.http.HttpStatusCode;
 import org.springframework.http.MediaType;
 import org.springframework.http.client.ClientHttpRequestExecution;
 import org.springframework.http.client.ClientHttpRequestInterceptor;
 import org.springframework.http.client.ClientHttpResponse;
 import org.springframework.util.StreamUtils;
 
+import java.io.ByteArrayInputStream;
 import java.io.IOException;
+import java.io.InputStream;
 import java.net.URI;
 import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
@@ -32,9 +35,11 @@ import java.util.Optional;
  * </ul>
  * </p>
  *
- * <p><strong>注意：</strong>为了安全地记录响应体，必须使用
- * {@link org.springframework.http.client.BufferingClientHttpRequestFactory} 包装 RestTemplate 的请求工厂，
- * 以便响应体可以被多次读取。否则响应流读取后将无法在业务代码中再次使用。</p>
+ * <p><strong>关于响应体：</strong>DEBUG 级别记录文本响应体时，本拦截器会把响应体缓冲一份并返回
+ * 可重复读取的响应，因此无论调用方是否用
+ * {@link org.springframework.http.client.BufferingClientHttpRequestFactory} 包装请求工厂，
+ * 业务代码都能读到完整内容。代价是该次调用会在堆上多留一份完整响应体（调用方若也做了缓冲则共两份），
+ * 响应体很大时请酌情控制本拦截器的日志级别。</p>
  *
  * <p>示例用法：
  * <pre>{@code
@@ -98,6 +103,8 @@ public class RestClientLoggingInterceptor implements ClientHttpRequestIntercepto
 
         if (LOGGER.isDebugEnabled()) {
             if (isTextType(headers.getContentType())) {
+                // 记日志会把响应流读走，统一缓冲一份再往下传，保证业务代码仍能读到完整内容
+                response = new BufferedClientHttpResponse(response);
                 Charset contentCharset = Optional.ofNullable(Optional.ofNullable(headers.getContentType())
                         .orElse(MediaType.APPLICATION_JSON).getCharset()).orElse(StandardCharsets.UTF_8);
                 String responseBody = StreamUtils.copyToString(response.getBody(), contentCharset);
@@ -108,6 +115,53 @@ public class RestClientLoggingInterceptor implements ClientHttpRequestIntercepto
         }
 
         return response;
+    }
+
+    /**
+     * 把响应体整体缓冲下来，使其可以被重复读取；其余行为一律委托给原响应。
+     *
+     * <p>只在 DEBUG 要记录响应体时使用。此时会在堆上多留一份完整响应体的副本：
+     * 调用方若已用 {@link org.springframework.http.client.BufferingClientHttpRequestFactory}
+     * 包装请求工厂，响应体会同时存在两份。响应体很大时请酌情控制本拦截器的日志级别。
+     *
+     * <p>不去推断原响应是否已经可重复读取——{@link ClientHttpResponse} 并无
+     * “每次 {@link #getBody()} 都给出独立的流”这类契约，装饰器完全可能每次返回新的包装流、
+     * 底层却共用同一条一次性网络流，据此推断会把业务侧的响应体读没。因此一律从单次
+     * {@code getBody()} 缓冲。
+     */
+    private static class BufferedClientHttpResponse implements ClientHttpResponse {
+        private final ClientHttpResponse delegate;
+        private final byte[] body;
+
+        BufferedClientHttpResponse(ClientHttpResponse delegate) throws IOException {
+            this.delegate = delegate;
+            this.body = StreamUtils.copyToByteArray(delegate.getBody());
+        }
+
+        @Override
+        public InputStream getBody() {
+            return new ByteArrayInputStream(body);
+        }
+
+        @Override
+        public HttpHeaders getHeaders() {
+            return delegate.getHeaders();
+        }
+
+        @Override
+        public HttpStatusCode getStatusCode() throws IOException {
+            return delegate.getStatusCode();
+        }
+
+        @Override
+        public String getStatusText() throws IOException {
+            return delegate.getStatusText();
+        }
+
+        @Override
+        public void close() {
+            delegate.close();
+        }
     }
 
     private boolean isTextType(MediaType mediaType) {

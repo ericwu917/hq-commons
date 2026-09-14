@@ -13,7 +13,12 @@ import org.springframework.mock.http.client.MockClientHttpRequest;
 import org.springframework.mock.http.client.MockClientHttpResponse;
 import org.springframework.test.util.ReflectionTestUtils;
 
+import org.springframework.util.StreamUtils;
+
+import java.io.ByteArrayInputStream;
+import java.io.FilterInputStream;
 import java.io.IOException;
+import java.io.InputStream;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
 
@@ -154,5 +159,110 @@ class RestClientLoggingInterceptorTest {
         // Assert
         // 没有 Content-Type 默认为非文本，走二进制日志逻辑
         verify(mockLogger).debug(contains("Request body: [Binary data]"), any(), eq(null), eq(4));
+    }
+
+    /**
+     * 响应体不可重复读取时（调用方没配 BufferingClientHttpRequestFactory），
+     * 拦截器记完日志后业务代码仍应能读到完整内容，且可反复读。
+     */
+    @Test
+    void testIntercept_NonRepeatableBody_ShouldBufferForCaller() throws IOException {
+        // Arrange
+        when(mockLogger.isDebugEnabled()).thenReturn(true);
+
+        MockClientHttpRequest request = new MockClientHttpRequest(HttpMethod.POST, URI.create("http://example.com/api"));
+        request.getHeaders().setContentType(MediaType.APPLICATION_JSON);
+
+        // MockClientHttpResponse 每次 getBody() 返回同一个流，即一次性响应
+        MockClientHttpResponse response =
+                new MockClientHttpResponse("{\"res\":\"data\"}".getBytes(StandardCharsets.UTF_8), HttpStatus.OK);
+        response.getHeaders().setContentType(MediaType.APPLICATION_JSON);
+        when(execution.execute(any(), any())).thenReturn(response);
+
+        // Act
+        ClientHttpResponse result = interceptor.intercept(request, "{}".getBytes(StandardCharsets.UTF_8), execution);
+
+        // Assert：日志已经读过一遍，业务代码还能完整读到，且可重复读
+        assertEquals("{\"res\":\"data\"}", StreamUtils.copyToString(result.getBody(), StandardCharsets.UTF_8));
+        assertEquals("{\"res\":\"data\"}", StreamUtils.copyToString(result.getBody(), StandardCharsets.UTF_8));
+        assertEquals(HttpStatus.OK, result.getStatusCode());
+        assertEquals(MediaType.APPLICATION_JSON, result.getHeaders().getContentType());
+        // 其余行为一律委托给原响应
+        assertEquals(HttpStatus.OK.getReasonPhrase(), result.getStatusText());
+        result.close();
+    }
+
+    /**
+     * 每次 getBody() 都返回新的包装流、底层却共用同一条一次性流。
+     * 这种响应不能凭“对象不同”就当作可重复读取，否则日志读完业务侧只剩 EOF。
+     */
+    @Test
+    void testIntercept_DecoratedSharedStream_ShouldBufferForCaller() throws IOException {
+        // Arrange
+        when(mockLogger.isDebugEnabled()).thenReturn(true);
+
+        MockClientHttpRequest request = new MockClientHttpRequest(HttpMethod.POST, URI.create("http://example.com/api"));
+        request.getHeaders().setContentType(MediaType.APPLICATION_JSON);
+
+        when(execution.execute(any(), any())).thenReturn(new SharedStreamMockResponse("{\"res\":\"data\"}"));
+
+        // Act
+        ClientHttpResponse result = interceptor.intercept(request, "{}".getBytes(StandardCharsets.UTF_8), execution);
+
+        // Assert
+        assertEquals("{\"res\":\"data\"}", StreamUtils.copyToString(result.getBody(), StandardCharsets.UTF_8));
+        assertEquals("{\"res\":\"data\"}", StreamUtils.copyToString(result.getBody(), StandardCharsets.UTF_8));
+    }
+
+    /** 已经可重复读取的响应（如 BufferingClientHttpRequestFactory 的包装）同样不受影响。 */
+    @Test
+    void testIntercept_RepeatableBody_ShouldStayReadable() throws IOException {
+        // Arrange
+        when(mockLogger.isDebugEnabled()).thenReturn(true);
+
+        MockClientHttpRequest request = new MockClientHttpRequest(HttpMethod.POST, URI.create("http://example.com/api"));
+        request.getHeaders().setContentType(MediaType.APPLICATION_JSON);
+
+        when(execution.execute(any(), any())).thenReturn(new RepeatableMockResponse("{\"res\":\"data\"}"));
+
+        // Act
+        ClientHttpResponse result = interceptor.intercept(request, "{}".getBytes(StandardCharsets.UTF_8), execution);
+
+        // Assert
+        assertEquals("{\"res\":\"data\"}", StreamUtils.copyToString(result.getBody(), StandardCharsets.UTF_8));
+        assertEquals("{\"res\":\"data\"}", StreamUtils.copyToString(result.getBody(), StandardCharsets.UTF_8));
+    }
+
+    /** 模拟 BufferingClientHttpRequestFactory 的效果：每次 getBody() 都给出独立的流。 */
+    private static class RepeatableMockResponse extends MockClientHttpResponse {
+        private final byte[] body;
+
+        RepeatableMockResponse(String body) {
+            super(body.getBytes(StandardCharsets.UTF_8), HttpStatus.OK);
+            this.body = body.getBytes(StandardCharsets.UTF_8);
+            getHeaders().setContentType(MediaType.APPLICATION_JSON);
+        }
+
+        @Override
+        public InputStream getBody() {
+            return new ByteArrayInputStream(body);
+        }
+    }
+
+    /** 合法但“看着像可重复读”的响应：每次是新的包装对象，底层共用同一条流。 */
+    private static class SharedStreamMockResponse extends MockClientHttpResponse {
+        private final InputStream shared;
+
+        SharedStreamMockResponse(String body) {
+            super(body.getBytes(StandardCharsets.UTF_8), HttpStatus.OK);
+            this.shared = new ByteArrayInputStream(body.getBytes(StandardCharsets.UTF_8));
+            getHeaders().setContentType(MediaType.APPLICATION_JSON);
+        }
+
+        @Override
+        public InputStream getBody() {
+            return new FilterInputStream(shared) {
+            };
+        }
     }
 }
