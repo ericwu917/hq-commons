@@ -17,7 +17,6 @@
 
   <properties>
     <spring-boot4.version>4.1.1</spring-boot4.version>
-    <mybatis-plus4.version>3.5.17</mybatis-plus4.version>
     <!-- 纯测试模块：没有 main 代码，不发布、不计覆盖率 -->
     <maven.deploy.skip>true</maven.deploy.skip>
     <jacoco.skip>true</jacoco.skip>
@@ -31,12 +30,6 @@
         <version>${spring-boot4.version}</version>
         <type>pom</type>
         <scope>import</scope>
-      </dependency>
-      <!-- 父 pom 把 mybatis-plus 钉在 3.5.11；SB4 消费方用的是 boot4 starter 这条线，整体压到同一版本 -->
-      <dependency>
-        <groupId>com.baomidou</groupId>
-        <artifactId>mybatis-plus</artifactId>
-        <version>${mybatis-plus4.version}</version>
       </dependency>
     </dependencies>
   </dependencyManagement>
@@ -88,8 +81,9 @@
     </dependency>
     <dependency>
       <groupId>com.baomidou</groupId>
+      <!-- SB4 消费方换用 boot4 starter，版本与 SB3 线共用父 pom 的 mybatis-plus.version -->
       <artifactId>mybatis-plus-spring-boot4-starter</artifactId>
-      <version>${mybatis-plus4.version}</version>
+      <version>${mybatis-plus.version}</version>
       <scope>test</scope>
     </dependency>
     <dependency>

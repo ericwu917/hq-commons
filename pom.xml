@@ -19,7 +19,9 @@
     <maven-compiler-plugin.version>3.14.1</maven-compiler-plugin.version>
     <maven-source-plugin.version>3.3.1</maven-source-plugin.version>
     <maven-release-plugin.version>3.1.1</maven-release-plugin.version>
-    <mybatis-plus.version>3.5.11</mybatis-plus.version>
+    <!-- 3.5.17 把 IService/ServiceImpl 从 extension.service 搬到 spring.service 且无兼容壳，会断下游编译；
+         3.5.16 既有 mybatis-plus-spring-boot4-starter（3.5.13 起才有）、又保留旧包路径，两条线可共用 -->
+    <mybatis-plus.version>3.5.16</mybatis-plus.version>
 <!--    <dubbo.version>2.7.12</dubbo.version>-->
     <jsqlparser.version>4.9</jsqlparser.version>
     <jacoco.version>0.8.12</jacoco.version>
