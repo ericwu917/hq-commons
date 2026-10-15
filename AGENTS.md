@@ -52,14 +52,14 @@ mvn verify                               # 含 JaCoCo 覆盖率门（见下）
 
 ## 分支与发布
 
-- **remote**：`ericwu917@github` = `ericwu917/hq-commons` —— **真源**（2026-09-12 起），Actions 与发布都在这；下游 `payment26-backend` 也在这个账号下。`taige@github` = `taige/hq-commons`：旧主仓，**账号被 GitHub 以 billing 问题锁定、Actions 一步都跑不了**（`The job was not started because your account is locked due to a billing issue`，与用量无关：public 仓分钟数免费，且锁定前 5 个月零运行），原样留着不动，别往它推。`ali_codeup`：云效 Codeup 镜像，落后。
-- `gh` 与 `git push` 都用全局 active 账号 `ericwu917`，**本仓不需要切账号**（历史上为 taige 配的仓库级 credential helper 已删除）。
+- **remote**：`ericwu917@github` = `ericwu917/hq-commons` —— **真源**（2026-09-12 起），Actions 与发布都在这。`taige@github` = `taige/hq-commons`：旧主仓，**账号被 GitHub 以 billing 问题锁定、Actions 一步都跑不了**（报错 `The job was not started because your account is locked due to a billing issue`），原样留着不动，别往它推。`ali_codeup`：云效 Codeup 镜像，落后。
+- `gh` 与 `git push` 都用全局 active 账号 `ericwu917`，**本仓不需要切账号**。
 - **没有 `origin`**：全局 worktree hook 找不到 `origin/develop` 会退到当前 HEAD，开 worktree 前先 `git fetch ericwu917@github && git checkout develop && git pull`。本仓已设 `gh repo set-default ericwu917/hq-commons`、`remote.pushDefault` / `checkout.defaultRemote` = `ericwu917@github`。
-- **版本现状（2026-09-12）**：`develop` 是当前线（1.17.0-SNAPSHOT）。**最后一次 release 是 v1.4.0（2025-03-06）**，`master` 停在 `1.4.1-SNAPSHOT`；**1.5–1.16 不存在**——5c67391（2026-01-14）随 JDK 17 升级把版本号从 `1.4.1-SNAPSHOT` 直接改成 `1.17.0-SNAPSHOT`，之后只发过 SNAPSHOT，下游全在吃它。下次 release 就是 1.17.0，develop → master 会是跨 1.4 → 1.17 的大合并。
+- **版本现状（2026-09-12）**：`develop` 是当前线（1.17.0-SNAPSHOT）。**最后一次 release 是 v1.4.0（2025-03-06）**，`master` 停在 `1.4.1-SNAPSHOT`；**1.5–1.16 不存在**（升 JDK 17 时按 minor 号规则直接跳到 `1.17.0-SNAPSHOT`），之后只发过 SNAPSHOT，下游全在吃它。下次 release 就是 1.17.0，develop → master 会是跨 1.4 → 1.17 的大合并。
 - **发布全靠 GitHub Actions，不在本地跑 release**：`feature/*` → `develop`（推送触发 `maven-snapshot.yml`：SNAPSHOT 发 GitHub Packages + Aliyun 云效）→ 把 develop 合到 `master` 推上去（触发 `maven-release.yml`：job 1 `release:prepare/perform` 打 tag `v<version>`、bump 下一个 SNAPSHOT、发 GitHub Packages；job 2 调 `maven-release-aliyun.yml` 按 tag 发 Aliyun）→ 手动 dispatch `maven-release-merge-to-develop.yml` 把 master ff-merge 回 develop。**Aliyun 那步失败只重跑它**：Re-run failed jobs，或手动 dispatch `maven-release-aliyun.yml` 填同一个 tag；别重跑整个 release，那会再切一个版本。
 - 发布产物两处：GitHub Packages（`maven.pkg.github.com/ericwu917/hq-commons`，pom 的 distributionManagement，含 sources jar）与 Aliyun 云效 packages（workflow 里用 `-Dalt*DeploymentRepository` 指过去）。业务仓从 Aliyun 拉。**Aliyun 有意不发 sources**：两条 Aliyun 步骤都是 `package deploy:deploy` 而非完整 `deploy`，就是为了跳过 verify 阶段的 source plugin，别"修"成 `deploy`。
 - **SNAPSHOT 不是终点**：下游要打 release tag 之前，本仓得先发 release 版本。
-- **CI 挂了先查，别靠重跑**：历史上 hq-cp 的 snapshot run 常年"失败→重跑→成功"，查下去是三个真 bug（测试间污染 JVM 级单例驱动、BeanConverter 装箱属性丢失、测试断言依赖连接创建顺序），2026-09-13 已修。surefire 的 `runOrder` 因此钉成 `alphabetical`（见父 pom 注释），别当噪音删掉。
+- **CI 挂了先查根因，别靠重跑**：本仓"重跑就过"的失败查下来都是真 bug（测试间共享 JVM 级单例、断言依赖执行顺序）。surefire 的 `runOrder` 钉成 `alphabetical`，是因为默认的文件系统顺序在 macOS 与 Linux 上不同，顺序依赖只会在 CI 暴露（见父 pom 注释），别当噪音删掉。
 
 ## 编码约定
 
@@ -75,7 +75,7 @@ mvn verify                               # 含 JaCoCo 覆盖率门（见下）
 
 - 既有 `*-boot-starter` 是 **SB3 线**，不改成 SB4-only；SB4 支持用**新模块**承接（`hq-cp-boot4-starter`）：新模块自己 import `spring-boot-dependencies` 4.x BOM，子模块自己的 import 先于从父 pom 继承的 3.x BOM（已用 `dependency:tree` 验证），父 pom 的 BOM 版本不动。
 - 库的字节码目标保持 Java 17，两条线共用 hq-cp / hq-utils 等无 Boot 依赖的本体。
-- **SB4 消费方的接法**（`hq-boot4-compat-test` 在 SB 4.1.1 / MP boot4 starter 3.5.17 / HV 9 / Jackson 3 下验证过）：`hq-cp-boot4-starter` 替换 `hq-cp-boot-starter`；`hq-utils-spring` / `hq-spring-webmvc` / `hq-mybatis-plus-extension` / `hq-email-boot-starter` 原样用，不做 boot4 变体。
+- **SB4 消费方的接法**（`hq-boot4-compat-test` 覆盖的组合：SB 4.1.1 / MP boot4 starter（与 SB3 线共用父 pom 的 `mybatis-plus.version`，当前 3.5.16）/ HV 9 / Jackson 3）：`hq-cp-boot4-starter` 替换 `hq-cp-boot-starter`；`hq-utils-spring` / `hq-spring-webmvc` / `hq-mybatis-plus-extension` / `hq-email-boot-starter` 原样用，不做 boot4 变体。
 - **SB4 已知限制**：`JsonFieldArgumentProcessor` 内部用 Jackson 2 的 `JsonNode`，把 SB4 默认的 Jackson 3 转换器喂给它会 400（`HttpMessageNotReadableException`）——必须显式 `new JsonFieldArgumentProcessor(List.of(new MappingJackson2HttpMessageConverter()))`（SB3 消费方本来就是这么接的）；`ValidatedDeserializer` 同理只对 Jackson 2 `ObjectMapper` 生效。MP 3.5.9+ 的 `PaginationInnerInterceptor` 要另加 `mybatis-plus-jsqlparser`。
 - 改共享模块后 `mvn verify` 会顺带跑 `hq-boot4-compat-test`；单跑它（`-pl`）前先 `install -DskipTests` 上游，它用的是已构建 jar，否则拿到的是 `~/.m2` 里的旧包。
 
