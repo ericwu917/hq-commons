@@ -10,6 +10,7 @@ import org.junit.jupiter.api.Test;
 import java.lang.reflect.Proxy;
 import java.sql.*;
 import java.util.Properties;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import static org.easymock.EasyMock.*;
 import static org.junit.jupiter.api.Assertions.*;
@@ -1247,6 +1248,165 @@ public class PooledConnectionTest {
 
         proxy.close();
         control.verify();
+    }
+
+    /**
+     * Test: 驱动已关闭真实语句（closeOnCompletion 后结果集关闭）时，归还的 PreparedStatement 不再留在缓存
+     */
+    @Test
+    public void testPreparedStatementClosedByDriverEvictedOnCheckIn() throws SQLException {
+        String sql = "SELECT * FROM t WHERE id = ?";
+        AtomicBoolean realClosed = new AtomicBoolean(false);
+        PreparedStatement mockPstmt1 = control.createMock(PreparedStatement.class);
+        PreparedStatement mockPstmt2 = control.createMock(PreparedStatement.class);
+
+        expect(mockRealConnection.getAutoCommit()).andReturn(true).anyTimes();
+        expect(mockRealConnection.prepareStatement(sql)).andReturn(mockPstmt1).andReturn(mockPstmt2);
+        stubDefaultResultSetType(mockPstmt1, mockPstmt2);
+        expect(mockPstmt1.isClosed()).andAnswer(realClosed::get).anyTimes();
+        mockPstmt2.setString(1, "b");
+        expectLastCall().once();
+
+        mockPool.checkIn(anyObject(PooledConnection.class));
+        expectLastCall().once();
+
+        control.replay();
+
+        PooledConnection pooledConnection = new PooledConnection(mockPool, 1);
+        Connection proxy = pooledConnection.checkOut(true);
+
+        PreparedStatement pstmt = proxy.prepareStatement(sql);
+        pstmt.closeOnCompletion();
+        realClosed.set(true); // 模拟驱动在结果集关闭时关闭真实语句
+        pstmt.close();
+        assertEquals(0, pooledConnection.getCachedPreStatementsCount());
+
+        // 第二次 prepare 必须拿到新的真实语句
+        proxy.prepareStatement(sql).setString(1, "b");
+        assertEquals(1, pooledConnection.getCachedPreStatementsCount());
+
+        proxy.close();
+        control.verify();
+    }
+
+    /**
+     * Test: 事务内语句未归还、真实语句已被驱动关闭时，同线程再次 prepare 命中缓存也要换新语句
+     */
+    @Test
+    public void testPreparedStatementClosedByDriverReplacedOnCacheHit() throws SQLException {
+        String sql = "SELECT * FROM t WHERE id = ?";
+        AtomicBoolean realClosed = new AtomicBoolean(false);
+        PreparedStatement mockPstmt1 = control.createMock(PreparedStatement.class);
+        PreparedStatement mockPstmt2 = control.createMock(PreparedStatement.class);
+
+        expect(mockRealConnection.getAutoCommit()).andReturn(false).anyTimes();
+        expect(mockRealConnection.prepareStatement(sql)).andReturn(mockPstmt1).andReturn(mockPstmt2);
+        stubDefaultResultSetType(mockPstmt1, mockPstmt2);
+        expect(mockPstmt1.isClosed()).andAnswer(realClosed::get).anyTimes();
+        mockPstmt2.setString(1, "b");
+        expectLastCall().once();
+
+        mockPool.checkIn(anyObject(PooledConnection.class));
+        expectLastCall().once();
+
+        control.replay();
+
+        PooledConnection pooledConnection = new PooledConnection(mockPool, 1);
+        Connection proxy = pooledConnection.checkOut(true);
+
+        PreparedStatement pstmt1 = proxy.prepareStatement(sql);
+        pstmt1.closeOnCompletion();
+        realClosed.set(true); // 调用方不 close 语句，驱动在结果集关闭时已关闭真实语句
+
+        PreparedStatement pstmt2 = proxy.prepareStatement(sql);
+        assertNotSame(pstmt1, pstmt2);
+        pstmt2.setString(1, "b");
+        assertEquals(1, pooledConnection.getCachedPreStatementsCount());
+
+        proxy.close();
+        control.verify();
+    }
+
+    /**
+     * Test: 驱动已关闭真实语句时，归还的 Statement 不进空闲池
+     */
+    @Test
+    public void testStatementClosedByDriverNotReused() throws SQLException {
+        AtomicBoolean realClosed = new AtomicBoolean(false);
+        Statement mockStmt1 = control.createMock(Statement.class);
+        Statement mockStmt2 = control.createMock(Statement.class);
+
+        expect(mockRealConnection.getAutoCommit()).andReturn(true).anyTimes();
+        expect(mockRealConnection.createStatement()).andReturn(mockStmt1).andReturn(mockStmt2);
+        stubDefaultResultSetType(mockStmt1, mockStmt2);
+        expect(mockStmt1.isClosed()).andAnswer(realClosed::get).anyTimes();
+
+        mockPool.checkIn(anyObject(PooledConnection.class));
+        expectLastCall().once();
+
+        control.replay();
+
+        PooledConnection pooledConnection = new PooledConnection(mockPool, 1);
+        Connection proxy = pooledConnection.checkOut(true);
+
+        Statement stmt = proxy.createStatement();
+        stmt.closeOnCompletion();
+        realClosed.set(true);
+        stmt.close();
+        assertEquals(0, pooledConnection.getCachedStatementsCount());
+
+        // 第二次 createStatement 必须拿到新的真实语句
+        proxy.createStatement().close();
+        assertEquals(1, pooledConnection.getCachedStatementsCount());
+
+        proxy.close();
+        control.verify();
+    }
+
+    /**
+     * Test: 归还时真实语句仍打开、进空闲池后才被驱动关闭（如 closeOnCompletion 后晚关的 generated keys），出池时也要换新语句
+     */
+    @Test
+    public void testIdleStatementClosedByDriverNotReused() throws SQLException {
+        AtomicBoolean realClosed = new AtomicBoolean(false);
+        Statement mockStmt1 = control.createMock(Statement.class);
+        Statement mockStmt2 = control.createMock(Statement.class);
+
+        expect(mockRealConnection.getAutoCommit()).andReturn(true).anyTimes();
+        expect(mockRealConnection.createStatement()).andReturn(mockStmt1).andReturn(mockStmt2);
+        stubDefaultResultSetType(mockStmt1, mockStmt2);
+        expect(mockStmt1.isClosed()).andAnswer(realClosed::get).anyTimes();
+        expect(mockStmt2.executeUpdate("UPDATE t SET a = 1")).andReturn(1).once();
+
+        mockPool.checkIn(anyObject(PooledConnection.class));
+        expectLastCall().once();
+
+        control.replay();
+
+        PooledConnection pooledConnection = new PooledConnection(mockPool, 1);
+        Connection proxy = pooledConnection.checkOut(true);
+
+        Statement stmt1 = proxy.createStatement();
+        stmt1.closeOnCompletion();
+        stmt1.close();
+        assertEquals(1, pooledConnection.getCachedStatementsCount());
+        realClosed.set(true); // 语句已在空闲池，驱动随后才关闭真实语句
+
+        // 第二次 createStatement 必须拿到新的真实语句
+        Statement stmt2 = proxy.createStatement();
+        assertEquals(1, stmt2.executeUpdate("UPDATE t SET a = 1"));
+        stmt2.close();
+        assertEquals(1, pooledConnection.getCachedStatementsCount());
+
+        proxy.close();
+        control.verify();
+    }
+
+    private static void stubDefaultResultSetType(Statement... stmts) throws SQLException {
+        for (Statement stmt : stmts) {
+            expect(stmt.getResultSetType()).andReturn(ResultSet.TYPE_FORWARD_ONLY).anyTimes();
+            expect(stmt.getResultSetConcurrency()).andReturn(ResultSet.CONCUR_READ_ONLY).anyTimes();
+        }
     }
 
     /**

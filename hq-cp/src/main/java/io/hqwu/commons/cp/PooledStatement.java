@@ -440,6 +440,17 @@ public class PooledStatement implements InvocationHandler {
     }
 
     /**
+     * 真实语句是否已被驱动关闭（如调用方 closeOnCompletion 后结果集关闭），探测出错也按已关闭处理
+     */
+    public boolean isRealClosed() {
+        try {
+            return real_statement.isClosed();
+        } catch (SQLException e) {
+            return true;
+        }
+    }
+
+    /**
      * {@link ResultSet} 的代理包装类，用于增强结果集的可观测性。
      *
      * <p>主要功能包括：

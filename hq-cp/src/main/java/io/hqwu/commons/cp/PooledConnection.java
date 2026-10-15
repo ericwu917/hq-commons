@@ -477,6 +477,12 @@ public class PooledConnection implements PooledConnectionMBean {
         if (args == null) {
             //没有参数的createStatement才试图从池中获取取
             pstmt = idleStatementsPool.poll();
+            while (pstmt != null && pstmt.isRealClosed()) {
+                //进空闲池后真实语句才被驱动关闭（如 closeOnCompletion 后晚关的结果集），丢弃
+                pstmt.close();
+                validStatementNum.decrementAndGet();
+                pstmt = idleStatementsPool.poll();
+            }
         }
         if (pstmt == null) {
             //没有空闲连接
@@ -511,6 +517,10 @@ public class PooledConnection implements PooledConnectionMBean {
             if (args.length == 1) {
                 //没有额外参数的prepareStatement才试图从池中获取取
                 ppstmt = validPreStatementsPool.get((String) args[0]);
+                if (ppstmt != null && ppstmt.isRealClosed()) {
+                    evictPreStatement(ppstmt);
+                    ppstmt = null;
+                }
             }
             if (ppstmt == null) {
                 long invokeStart = System.nanoTime();
@@ -553,6 +563,10 @@ public class PooledConnection implements PooledConnectionMBean {
         synchronized (validPreStatementsPool) {
             if (args.length == 1) {
                 pcstmt = (PooledCallableStatement) validPreStatementsPool.get((String) args[0]);
+                if (pcstmt != null && pcstmt.isRealClosed()) {
+                    evictPreStatement(pcstmt);
+                    pcstmt = null;
+                }
             }
             if (pcstmt == null) {
                 long invokeStart = System.nanoTime();
@@ -584,7 +598,11 @@ public class PooledConnection implements PooledConnectionMBean {
     public void checkIn(PooledStatement pstmt) {
         activeStatementsPool.remove(pstmt.getStatementId());
         if (pstmt.isDefaultResultSetType()) {
-            if (! pstmt.isClosed()) {
+            if (pstmt.isRealClosed()) {
+                //驱动已关闭真实语句，不再回收复用
+                pstmt.close();
+                validStatementNum.decrementAndGet();
+            } else if (! pstmt.isClosed()) {
                 idleStatementsPool.offer(pstmt);
             }
         } else {
@@ -600,10 +618,27 @@ public class PooledConnection implements PooledConnectionMBean {
     public void checkIn(PooledPreparedStatement ppstmt) {
         activeStatementsPool.remove(ppstmt.getStatementId());
         if (ppstmt.isDefaultResultSetType()) {
-            ppstmt.cleanCache();
+            if (ppstmt.isRealClosed()) {
+                evictPreStatement(ppstmt);
+            } else {
+                ppstmt.cleanCache();
+            }
         } else {
             ppstmt.close();
         }
+    }
+
+    /**
+     * 真实语句已被驱动关闭（如调用方 closeOnCompletion 后结果集关闭）时移出缓存并关闭，避免下次 prepare 拿到已关闭的语句。
+     * 缓存 key 是原始 SQL，与 getPreparedSql() 不同，故按实例移除
+     * @param ppstmt PooledPreparedStatement
+     */
+    private void evictPreStatement(PooledPreparedStatement ppstmt) {
+        synchronized (validPreStatementsPool) {
+            validPreStatementsPool.values().remove(ppstmt);
+        }
+        activeStatementsPool.remove(ppstmt.getStatementId());
+        ppstmt.close();
     }
 
     public long getCheckOutTime() {
