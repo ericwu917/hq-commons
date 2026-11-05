@@ -140,7 +140,9 @@ public class PooledPreparedStatement extends PooledStatement {
             } else if (ClassUtil.isPrimitiveOrWrapper(p.getClass()) && p.getClass() != Character.class) {
                 sb.append(p);
             } else {
-                sb.append('\'').append(p).append('\'');
+                // 先转义 \ 再转义 '，保证内联后的 SQL 能被 SqlMasker 正确解析（该串只用于日志）
+                String s = String.valueOf(p).replace("\\", "\\\\").replace("'", "''");
+                sb.append('\'').append(s).append('\'');
             }
             idx = idxNext + 1;
         }

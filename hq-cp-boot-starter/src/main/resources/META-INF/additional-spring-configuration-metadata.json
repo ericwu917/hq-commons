@@ -151,8 +151,29 @@
     {
       "name": "spring.datasource.hqcp.sensitive-fields",
       "type": "java.util.Set<java.lang.String>",
-      "description": "敏感字段集",
+      "description": "敏感字段集。条目可带后缀 列名:首:尾（两个非负整数）指定该列的值保留首尾多少位、中间放一份 mask-pattern，如 bank_account:0:4；pin:0:0 表示整值全掩。无后缀的条目沿用全局规则；后缀格式不合法时启动报错",
       "sourceType": "io.hqwu.commons.cp.HqcpDataSourceBoot"
+    },
+    {
+      "name": "spring.datasource.hqcp.mask-keep-head",
+      "type": "java.lang.Integer",
+      "description": "脱敏时全局保留的首部位数。mask-keep-head / mask-keep-tail 任一 >= 0 即启用全局首尾保留规则（另一个未设按 0）：值长度 <= 首+尾 时输出 mask-pattern，否则输出 首部 + mask-pattern + 尾部；都未设时沿用默认脱敏算法。默认 -1（未设）",
+      "sourceType": "io.hqwu.commons.cp.HqcpDataSourceBoot",
+      "defaultValue": -1
+    },
+    {
+      "name": "spring.datasource.hqcp.mask-keep-tail",
+      "type": "java.lang.Integer",
+      "description": "脱敏时全局保留的尾部位数，规则见 mask-keep-head。默认 -1（未设）",
+      "sourceType": "io.hqwu.commons.cp.HqcpDataSourceBoot",
+      "defaultValue": -1
+    },
+    {
+      "name": "spring.datasource.hqcp.sensitive-fields-exact-match",
+      "type": "java.lang.Boolean",
+      "description": "敏感字段是否精确匹配列名。false：列名包含敏感字段即命中（子串匹配）；true：列名去掉两侧引号后与敏感字段相等才命中。默认 false",
+      "sourceType": "io.hqwu.commons.cp.HqcpDataSourceBoot",
+      "defaultValue": false
     },
     {
       "name": "spring.datasource.hqcp.mask-pattern",

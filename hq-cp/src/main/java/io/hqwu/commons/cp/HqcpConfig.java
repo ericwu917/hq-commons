@@ -155,11 +155,40 @@ public class HqcpConfig implements HqcpConfigMBean {
     private String maskPattern = "****";
 
     /**
-     * 敏感字段集
+     * 敏感字段集<br/>
+     * 条目可带后缀 {@code 列名:首:尾}（两个非负整数）指定该列的值保留首尾多少位，中间放一份 maskPattern，
+     * 如 {@code bank_account:0:4}；{@code pin:0:0} 表示整值全掩。无后缀的条目沿用全局规则（见 {@link #maskKeepHead}）。
+     * 后缀格式不合法时连接池初始化抛 {@link IllegalArgumentException}
      */
     @Getter
     @Setter
     private Set<String> sensitiveFields = new HashSet<>();
+
+    /**
+     * 脱敏时全局保留的首部位数<br/>
+     * 默认 -1（未设）。mask-keep-head / mask-keep-tail 任一 >= 0 即启用全局首尾保留规则，另一个未设按 0：
+     * 值长度 <= 首+尾 时输出 maskPattern，否则输出 首部 + maskPattern + 尾部；
+     * 都未设时沿用默认脱敏算法。按列后缀优先于全局规则
+     */
+    @Getter
+    @Setter
+    private int maskKeepHead = -1;
+
+    /**
+     * 脱敏时全局保留的尾部位数<br/>
+     * 默认 -1（未设），规则见 {@link #maskKeepHead}
+     */
+    @Getter
+    @Setter
+    private int maskKeepTail = -1;
+
+    /**
+     * 敏感字段是否精确匹配列名<br/>
+     * 默认 false：列名包含敏感字段即命中（子串匹配）；true：列名去掉两侧引号后与敏感字段相等才命中
+     */
+    @Getter
+    @Setter
+    private boolean sensitiveFieldsExactMatch = false;
 
     /**
      * 检测连接是否可用的查询语句<br/>
@@ -663,6 +692,9 @@ public class HqcpConfig implements HqcpConfigMBean {
             }
             this.sensitiveFields = newSensitiveFields;
         }
+        maskKeepHead = getInt(prop, "jdbc.mask-keep-head", maskKeepHead);
+        maskKeepTail = getInt(prop, "jdbc.mask-keep-tail", maskKeepTail);
+        sensitiveFieldsExactMatch = getBoolean(prop, "jdbc.sensitive-fields-exact-match", sensitiveFieldsExactMatch);
         commitOnClose = getBoolean(prop, "jdbc.commit-on-close", commitOnClose);
         setMinConnections(getInt(prop, "jdbc.min-connections", minConnections));
         setMaxConnections(getInt(prop, "jdbc.max-connections", maxConnections));
@@ -685,7 +717,8 @@ public class HqcpConfig implements HqcpConfigMBean {
 
     private static final String[] PROPERTIES = new String[] {
             "jdbc.url", "jdbc.username", "jdbc.password", "jdbc.driver", "jdbc.driver-class-name",
-            "jdbc.verbose", "jdbc.print-sql", "jdbc.mask-sql", "jdbc.mask-pattern", "jdbc.sensitive-fields", "jdbc.commit-on-close", "jdbc.min-connections", "jdbc.max-connections",
+            "jdbc.verbose", "jdbc.print-sql", "jdbc.mask-sql", "jdbc.mask-pattern", "jdbc.sensitive-fields",
+            "jdbc.mask-keep-head", "jdbc.mask-keep-tail", "jdbc.sensitive-fields-exact-match", "jdbc.commit-on-close", "jdbc.min-connections", "jdbc.max-connections",
             "jdbc.idle-timeout-sec", "jdbc.checkout-timeout-millisec", "jdbc.lifetime-sec",
             "jdbc.check-statement", "jdbc.max-statements", "jdbc.max-pre-statements", "jdbc.jmx-level", "jdbc.transaction-mode", "jdbc.lazy-init",
             "jdbc.info-sql-threshold", "jdbc.warn-sql-threshold", /* "jdbc.use-oracle-implicit-cache", */
@@ -717,6 +750,9 @@ public class HqcpConfig implements HqcpConfigMBean {
         logger.info("maskSql                 = " + maskSql);
         logger.info("maskPattern             = " + maskPattern);
         logger.info("sensitiveFields         = " + sensitiveFields);
+        logger.info("maskKeepHead            = " + maskKeepHead);
+        logger.info("maskKeepTail            = " + maskKeepTail);
+        logger.info("sensitiveFieldsExactMatch = " + sensitiveFieldsExactMatch);
         logger.info("checkStatement          = '" + checkStatement + "'");
         logger.info("lazyInit                = " + lazyInit);
         logger.info("infoSqlThreshold        = " + infoSqlThreshold);

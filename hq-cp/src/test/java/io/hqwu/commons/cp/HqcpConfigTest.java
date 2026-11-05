@@ -261,6 +261,28 @@ public class HqcpConfigTest {
     }
 
     @Test
+    public void testMaskKeepAndExactMatch() throws Exception {
+        assertEquals(-1, config.getMaskKeepHead());
+        assertEquals(-1, config.getMaskKeepTail());
+        assertFalse(config.isSensitiveFieldsExactMatch());
+        // 不设时保持默认
+        config.setProperties(prop);
+        assertEquals(-1, config.getMaskKeepHead());
+        assertEquals(-1, config.getMaskKeepTail());
+        assertFalse(config.isSensitiveFieldsExactMatch());
+
+        prop.setProperty("jdbc.mask-keep-head", "0");
+        prop.setProperty("jdbc.mask-keep-tail", "4");
+        prop.setProperty("jdbc.sensitive-fields-exact-match", "true");
+        prop.setProperty("jdbc.sensitive-fields", "password,bank_account:0:4");
+        config.setProperties(prop);
+        assertEquals(0, config.getMaskKeepHead());
+        assertEquals(4, config.getMaskKeepTail());
+        assertTrue(config.isSensitiveFieldsExactMatch());
+        assertTrue(config.getSensitiveFields().contains("bank_account:0:4"));
+    }
+
+    @Test
     public void testSensitiveFieldsWithSpaces() throws Exception {
         // 测试包含空格的情况
         prop.setProperty("jdbc.sensitive-fields", " password , mobile , idCard ");

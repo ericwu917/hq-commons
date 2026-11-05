@@ -1,5 +1,6 @@
 package io.hqwu.commons.cp;
 
+import io.hqwu.commons.cp.util.SqlMasker;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -421,6 +422,48 @@ class PooledPreparedStatementTest {
         // 5. Verification
         String debugSql = pooledPstmt.getSqlDoing();
         assertTrue(debugSql.contains("'ComplexData'"), "SQL log should contain toString() of object");
+
+        verify(mockPooledConnection, mockRealPreparedStatement, mockResultSet);
+    }
+
+    /**
+     * 内联参数含 ' 和 \ 时先转义，内联后的 SQL 能被 SqlMasker 解析，敏感值被掩
+     */
+    @Test
+    void testInlineParamsEscapedAndMaskable() throws SQLException {
+        String sql = "UPDATE users SET name = ?, password = ?, flag = ? WHERE id = ?";
+
+        expect(mockPooledConnection.getConnectionName()).andReturn("test-conn").anyTimes();
+        expect(mockRealPreparedStatement.getResultSetType()).andReturn(ResultSet.TYPE_FORWARD_ONLY).anyTimes();
+        expect(mockRealPreparedStatement.getResultSetConcurrency()).andReturn(ResultSet.CONCUR_READ_ONLY).anyTimes();
+        mockRealPreparedStatement.setString(1, "O'Brien-Smith");
+        expectLastCall().once();
+        mockRealPreparedStatement.setString(2, "C:\\pw\\it's-a-secret");
+        expectLastCall().once();
+        mockRealPreparedStatement.setObject(3, '\'');
+        expectLastCall().once();
+        mockRealPreparedStatement.setInt(4, 7);
+        expectLastCall().once();
+        replay(mockPooledConnection, mockRealPreparedStatement, mockResultSet);
+
+        PooledPreparedStatement pooledPstmt = new PooledPreparedStatement(
+                mockPooledConnection, mockRealPreparedStatement, 110, new Object[]{sql});
+        PreparedStatement proxy = (PreparedStatement) pooledPstmt.checkOut();
+        proxy.setString(1, "O'Brien-Smith");
+        proxy.setString(2, "C:\\pw\\it's-a-secret");
+        proxy.setObject(3, '\'');
+        proxy.setInt(4, 7);
+
+        String debugSql = pooledPstmt.getSqlDoing();
+        assertEquals("UPDATE users SET name = 'O''Brien-Smith', password = 'C:\\\\pw\\\\it''s-a-secret',"
+                + " flag = '''' WHERE id = 7", debugSql.trim());
+
+        SqlMasker masker = new SqlMasker("****", java.util.Set.of("name", "password"));
+        String masked = masker.maskSensitiveFields(debugSql);
+        assertFalse(masked.contains("Brien-Smith"), masked);
+        assertFalse(masked.contains("secret"), masked);
+        assertTrue(masked.startsWith("UPDATE users SET name = '"), masked);
+        assertTrue(masked.contains(", flag = '''' WHERE id = 7"), masked);
 
         verify(mockPooledConnection, mockRealPreparedStatement, mockResultSet);
     }

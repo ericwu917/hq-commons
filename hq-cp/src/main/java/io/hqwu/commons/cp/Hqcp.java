@@ -193,7 +193,8 @@ public class Hqcp implements HqcpMBean {
         }
 
         if (config.getSensitiveFields() != null && !config.getSensitiveFields().isEmpty()) {
-            this.sqlMasker = new SqlMasker(config.getMaskPattern(), config.getSensitiveFields());
+            this.sqlMasker = new SqlMasker(config.getMaskPattern(), config.getSensitiveFields(),
+                    config.getMaskKeepHead(), config.getMaskKeepTail(), config.isSensitiveFieldsExactMatch());
         }
 
         monitor = new CPMonitor();

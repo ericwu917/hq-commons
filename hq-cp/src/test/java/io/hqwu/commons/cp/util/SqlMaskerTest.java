@@ -847,6 +847,227 @@ class SqlMaskerTest {
         void testNullSql() {
             assertNull(sqlMasker.maskSensitiveFields(null));
         }
+
+        /**
+         * 解析失败兜底：返回值不含原字面值，WARN 不含原 SQL / 异常 message，只有异常类名
+         */
+        @Test
+        void testParseFailureMasksAllLiteralsAndLogsNoSql() {
+            String invalidSql = "UPDATE users SET password = 'secret123', note = 'It''s \\' ok' WHERE ((( id = 'x1";
+            ch.qos.logback.classic.Logger logger =
+                    (ch.qos.logback.classic.Logger) org.slf4j.LoggerFactory.getLogger(SqlMasker.class);
+            ch.qos.logback.core.read.ListAppender<ch.qos.logback.classic.spi.ILoggingEvent> appender =
+                    new ch.qos.logback.core.read.ListAppender<>();
+            appender.start();
+            logger.addAppender(appender);
+            ch.qos.logback.classic.Level oldLevel = logger.getLevel();
+            logger.setLevel(ch.qos.logback.classic.Level.WARN);
+            try {
+                String masked = sqlMasker.maskSensitiveFields(invalidSql);
+                assertEquals("UPDATE users SET password = '****', note = '****' WHERE ((( id = '****", masked);
+
+                assertEquals(1, appender.list.size());
+                ch.qos.logback.classic.spi.ILoggingEvent event = appender.list.get(0);
+                assertEquals(ch.qos.logback.classic.Level.WARN, event.getLevel());
+                String msg = event.getFormattedMessage();
+                assertTrue(msg.contains("JSQLParserException"), msg);
+                assertFalse(msg.contains("secret123"), msg);
+                assertFalse(msg.contains("UPDATE"), msg);
+                assertNull(event.getThrowableProxy());
+            } finally {
+                logger.detachAppender(appender);
+                logger.setLevel(oldLevel);
+            }
+        }
+
+        @Test
+        void testMaskAllStringLiterals() {
+            assertEquals("a = '##' and b = '##'", SqlMasker.maskAllStringLiterals("a = 'x' and b = 'y'", "##"));
+            // '' 转义引号、\ 转义
+            assertEquals("a = '##' x", SqlMasker.maskAllStringLiterals("a = 'It''s' x", "##"));
+            assertEquals("a = '##' x", SqlMasker.maskAllStringLiterals("a = 'It\\'s' x", "##"));
+            assertEquals("a = '##', '##'", SqlMasker.maskAllStringLiterals("a = 'c:\\\\', 'y'", "##"));
+            // 空字面值
+            assertEquals("a = '##'", SqlMasker.maskAllStringLiterals("a = ''", "##"));
+            // 未闭合掩到结尾（含以 \ 结尾）
+            assertEquals("a = '##", SqlMasker.maskAllStringLiterals("a = 'abc", "##"));
+            assertEquals("a = '##", SqlMasker.maskAllStringLiterals("a = 'abc\\", "##"));
+            // 无字面值原样
+            assertEquals("select 1", SqlMasker.maskAllStringLiterals("select 1", "##"));
+            // maskPattern 为 null 时字面值清空
+            assertEquals("a = ''", SqlMasker.maskAllStringLiterals("a = 'x'", null));
+        }
+    }
+
+    /**
+     * 全局首尾保留规则 mask-keep-head / mask-keep-tail
+     */
+    @Nested
+    class GlobalKeepRule {
+        @Test
+        void testTailOnly() {
+            SqlMasker masker = new SqlMasker("****", sensitiveFields, -1, 4, false);
+            assertEquals("UPDATE users SET password = '****7890'",
+                    masker.maskSensitiveFields("UPDATE users SET password = '6222021234567890'"));
+            // 长度 <= head + tail 时整值输出 maskPattern
+            assertEquals("UPDATE users SET password = '****'",
+                    masker.maskSensitiveFields("UPDATE users SET password = '7890'"));
+            assertEquals("UPDATE users SET password = '****'",
+                    masker.maskSensitiveFields("UPDATE users SET password = 'abc'"));
+        }
+
+        @Test
+        void testHeadOnlyAndBoth() {
+            SqlMasker headOnly = new SqlMasker("****", sensitiveFields, 2, -1, false);
+            assertEquals("UPDATE users SET password = 'se****'",
+                    headOnly.maskSensitiveFields("UPDATE users SET password = 'secret123'"));
+            SqlMasker both = new SqlMasker("**", sensitiveFields, 1, 2, false);
+            assertEquals("UPDATE users SET password = 's**23'",
+                    both.maskSensitiveFields("UPDATE users SET password = 'secret123'"));
+            assertEquals("UPDATE users SET password = '**'",
+                    both.maskSensitiveFields("UPDATE users SET password = 'abc'"));
+        }
+
+        @Test
+        void testZeroZeroMasksWholeValue() {
+            SqlMasker masker = new SqlMasker("****", sensitiveFields, 0, 0, false);
+            assertEquals("UPDATE users SET password = '****'",
+                    masker.maskSensitiveFields("UPDATE users SET password = 'secret123456789'"));
+            assertEquals("UPDATE users SET password = '****'",
+                    masker.maskSensitiveFields("UPDATE users SET password = ''"));
+        }
+
+        @Test
+        void testLikeUsesGlobalRule() {
+            SqlMasker masker = new SqlMasker("****", sensitiveFields, -1, 4, false);
+            assertEquals("SELECT * FROM users WHERE password LIKE '%****7890%'",
+                    masker.maskSensitiveFields("SELECT * FROM users WHERE password LIKE '%6222021234567890%'"));
+        }
+
+        @Test
+        void testDoKeepMask() {
+            assertNull(SqlMasker.doKeepMask(null, "****", 0, 4));
+            assertEquals("123", SqlMasker.doKeepMask("123", null, 0, 0));
+            assertEquals("123", SqlMasker.doKeepMask("123", "", 0, 0));
+            assertEquals("12##90", SqlMasker.doKeepMask("1234567890", "##", 2, 2));
+            assertEquals("##", SqlMasker.doKeepMask("1234", "##", 2, 2));
+            assertEquals("1234##", SqlMasker.doKeepMask("1234567890", "##", 4, 0));
+        }
+    }
+
+    /**
+     * 按列后缀 列名:首:尾
+     */
+    @Nested
+    class PerColumnKeepRule {
+        private final Set<String> fields = new HashSet<>(Arrays.asList(
+                "bank_account:0:4", " PIN : 0 : 0 ", "password", "pin"));
+
+        @Test
+        void testSuffixOverridesDefaultAlgorithm() {
+            SqlMasker masker = new SqlMasker("****", fields);
+            assertEquals("UPDATE t SET bank_account = '****7890', pin = '****', password = 'sec****23'",
+                    masker.maskSensitiveFields(
+                            "UPDATE t SET bank_account = '6222021234567890', pin = '123456', password = 'secret123'"));
+        }
+
+        @Test
+        void testSuffixOverridesGlobalRule() {
+            SqlMasker masker = new SqlMasker("****", fields, 2, -1, false);
+            assertEquals("UPDATE t SET bank_account = '****7890', pin = '****', password = 'se****'",
+                    masker.maskSensitiveFields(
+                            "UPDATE t SET bank_account = '6222021234567890', pin = '123456', password = 'secret123'"));
+        }
+
+        @Test
+        void testLikeUsesColumnRule() {
+            SqlMasker masker = new SqlMasker("****", fields);
+            assertEquals("SELECT * FROM t WHERE bank_account LIKE '%****7890_'",
+                    masker.maskSensitiveFields("SELECT * FROM t WHERE bank_account LIKE '%6222021234567890_'"));
+            assertEquals("SELECT * FROM t WHERE PIN LIKE '****%'",
+                    masker.maskSensitiveFields("SELECT * FROM t WHERE PIN LIKE '123456%'"));
+        }
+
+        @Test
+        void testMultipleMatchesPreferEqualThenLongest() {
+            SqlMasker masker = new SqlMasker("**", new HashSet<>(Arrays.asList(
+                    "account:1:1", "bank_account:0:4", "ab:0:1", "bc:1:0")), -1, -1, false);
+            // 与列名相等的优先
+            assertEquals("UPDATE t SET account = '1**0'",
+                    masker.maskSensitiveFields("UPDATE t SET account = '1234567890'"));
+            assertEquals("UPDATE t SET `account` = '1**0'",
+                    masker.maskSensitiveFields("UPDATE t SET `account` = '1234567890'"));
+            assertEquals("UPDATE t SET bank_account = '**7890'",
+                    masker.maskSensitiveFields("UPDATE t SET bank_account = '1234567890'"));
+            // 没有相等的取最长
+            assertEquals("UPDATE t SET bank_account_no = '**7890'",
+                    masker.maskSensitiveFields("UPDATE t SET bank_account_no = '1234567890'"));
+            // 等长时取字典序小的（ab）
+            assertEquals("UPDATE t SET abc = '**0'",
+                    masker.maskSensitiveFields("UPDATE t SET abc = '1234567890'"));
+        }
+
+        @Test
+        void testIllegalSuffixFailsFast() {
+            for (String bad : new String[] {"pin:a:0", "pin:-1:0", "pin:0", "pin:0:0:0", ":0:4", "pin::4",
+                    "pin:99999999999:0", "pin:0:4.5"}) {
+                Set<String> set = new HashSet<>(Arrays.asList("password", bad));
+                assertThrows(IllegalArgumentException.class, () -> new SqlMasker("****", set), bad);
+            }
+            // 同一列给了不同的后缀
+            assertThrows(IllegalArgumentException.class,
+                    () -> new SqlMasker("****", new HashSet<>(Arrays.asList("pin:0:0", "PIN:0:4"))));
+            // 同一列相同后缀 / 后缀 + 无后缀 不冲突
+            assertDoesNotThrow(() -> new SqlMasker("****", new HashSet<>(Arrays.asList("pin:0:0", "PIN:0:0", "pin"))));
+        }
+    }
+
+    /**
+     * 精确列名匹配 sensitive-fields-exact-match
+     */
+    @Nested
+    class ExactMatch {
+        private final Set<String> fields = new HashSet<>(Arrays.asList("response_body", "pin:0:0"));
+
+        @Test
+        void testExactMatchDoesNotHitLongerColumn() {
+            SqlMasker masker = new SqlMasker("****", fields, -1, -1, true);
+            // 快速检查即可排除（response_body 后接 _ 不是标识符边界）
+            String sql = "UPDATE t SET response_body_excerpt = 'abcdefghij'";
+            assertEquals(sql, masker.maskSensitiveFields(sql));
+            sql = "UPDATE t SET response_body$x = 'abcdefghij'";
+            assertEquals(sql, masker.maskSensitiveFields(sql));
+            // 快速检查命中（字面值里有 response_body），但列名不相等，不掩
+            sql = "UPDATE t SET response_body_excerpt = 'abcdefghij', note = 'response_body'";
+            assertEquals(sql, masker.maskSensitiveFields(sql));
+        }
+
+        @Test
+        void testExactMatchHitsQuotedAndQualifiedColumn() {
+            SqlMasker masker = new SqlMasker("****", fields, -1, -1, true);
+            assertEquals("UPDATE t SET `response_body` = 'abc****hij'",
+                    masker.maskSensitiveFields("UPDATE t SET `response_body` = 'abcdefghij'"));
+            assertEquals("SELECT * FROM t WHERE \"RESPONSE_BODY\" = 'abc****hij'",
+                    masker.maskSensitiveFields("SELECT * FROM t WHERE \"RESPONSE_BODY\" = 'abcdefghij'"));
+            assertEquals("SELECT * FROM t WHERE t.response_body = 'abc****hij' AND pin = '****'",
+                    masker.maskSensitiveFields("SELECT * FROM t WHERE t.response_body = 'abcdefghij' AND pin = '1234'"));
+        }
+
+        @Test
+        void testSubstringModeUnchanged() {
+            SqlMasker masker = new SqlMasker("****", fields, -1, -1, false);
+            assertEquals("UPDATE t SET response_body_excerpt = 'abc****hij'",
+                    masker.maskSensitiveFields("UPDATE t SET response_body_excerpt = 'abcdefghij'"));
+        }
+
+        @Test
+        void testStripIdentifierQuotes() {
+            assertEquals("pin", SqlMasker.stripIdentifierQuotes("[pin]"));
+            assertEquals("pin", SqlMasker.stripIdentifierQuotes("`pin`"));
+            assertEquals("pin", SqlMasker.stripIdentifierQuotes("\"pin\""));
+            assertEquals("", SqlMasker.stripIdentifierQuotes("``"));
+            assertEquals("a`b", SqlMasker.stripIdentifierQuotes("a`b"));
+        }
     }
 
 }

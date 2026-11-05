@@ -1356,6 +1356,32 @@ public class HqcpTest {
     }
 
     /**
+     * Test: 掩码新配置（全局首尾保留、精确匹配）透传到 SqlMasker
+     */
+    @Test
+    public void testInitPoolWithSqlMaskerKeepAndExactMatch() throws Exception {
+        HqcpConfig testConfig = new HqcpConfig();
+        testConfig.setUrl(MockConstant.MOCK_URL);
+        testConfig.setDriverClassName(MockJDBCDriver.class.getName());
+        testConfig.setUsername("test");
+        testConfig.setPassword("test");
+        testConfig.setMinConnections(0);
+        testConfig.setLazyInit(true);
+        testConfig.setSensitiveFields(new java.util.HashSet<>(java.util.Arrays.asList("account", "pin:0:0")));
+        testConfig.setMaskKeepTail(4);
+        testConfig.setSensitiveFieldsExactMatch(true);
+
+        Hqcp pool = new Hqcp(testConfig);
+        try {
+            assertEquals("UPDATE t SET account = '****7890', bank_account = '6222021234567890', pin = '****'",
+                    pool.getSqlMasker().maskSensitiveFields(
+                            "UPDATE t SET account = '6222021234567890', bank_account = '6222021234567890', pin = '1234'"));
+        } finally {
+            pool.shutdown();
+        }
+    }
+
+    /**
      * Test: shutdown already shutdown pool (line 198)
      */
     @Test

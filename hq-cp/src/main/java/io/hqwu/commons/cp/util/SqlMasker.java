@@ -16,9 +16,12 @@ import net.sf.jsqlparser.statement.select.*;
 import net.sf.jsqlparser.statement.update.Update;
 import net.sf.jsqlparser.statement.update.UpdateSet;
 
+import java.util.Arrays;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
-import java.util.stream.Collectors;
 
 /**
  * 基于 JSQLParser 实现的 SQL 敏感字段脱敏工具类。
@@ -103,6 +106,21 @@ public class SqlMasker {
      */
     private final Set<String> sensitiveFields;
 
+    /**
+     * 按列的首尾保留规则：小写字段名 -> {首部保留位数, 尾部保留位数}，来自 sensitiveFields 条目的 {@code 列名:首:尾} 后缀
+     */
+    private final Map<String, int[]> fieldKeepRules;
+
+    /**
+     * 全局首尾保留规则 {首部保留位数, 尾部保留位数}；null 表示未启用（沿用 {@link #doValueMask(String, String)}）
+     */
+    private final int[] globalKeepRule;
+
+    /**
+     * 是否精确匹配列名：true 时列名（去掉两侧引号）与敏感字段相等才算命中；false 时为子串匹配
+     */
+    private final boolean exactMatch;
+
     private final MaskStatementVisitor maskStatementVisitor;
 
     private final MaskSelectVisitor maskSelectVisitor;
@@ -116,15 +134,75 @@ public class SqlMasker {
      * @param sensitiveFields 敏感字段集合：字段名不区分大小写，且会)
      */
     public SqlMasker(String maskPattern, Set<String> sensitiveFields) {
+        this(maskPattern, sensitiveFields, -1, -1, false);
+    }
+
+    /**
+     * 构造函数
+     * @param maskPattern 脱敏模式：如"***", "####", "????", "*#?●○"
+     * @param sensitiveFields 敏感字段集合：字段名不区分大小写；条目可带后缀 {@code 列名:首:尾}（两个非负整数），
+     *                        如 {@code bank_account:0:4}、{@code pin:0:0}，表示该列的值保留首尾多少位，中间放一份 maskPattern
+     * @param maskKeepHead 全局首部保留位数，负数表示未设
+     * @param maskKeepTail 全局尾部保留位数，负数表示未设；head / tail 任一 >= 0 即启用全局规则，另一个未设按 0
+     * @param exactMatch 是否精确匹配列名（false 为子串匹配）
+     * @throws IllegalArgumentException 条目后缀格式不合法（非整数、负数、段数不对），或同一列给了不同的后缀
+     */
+    public SqlMasker(String maskPattern, Set<String> sensitiveFields, int maskKeepHead, int maskKeepTail, boolean exactMatch) {
         this.maskPattern = maskPattern;
-        // 将敏感字段转换为小写以确保大小写不敏感
-        this.sensitiveFields = sensitiveFields == null ? null : sensitiveFields.stream()
-                .map(String::toLowerCase)
-                .collect(Collectors.toSet());
+        if (sensitiveFields == null) {
+            this.sensitiveFields = null;
+            this.fieldKeepRules = Map.of();
+        } else {
+            Set<String> fields = new HashSet<>();
+            Map<String, int[]> rules = new HashMap<>();
+            for (String entry : sensitiveFields) {
+                parseFieldEntry(entry, fields, rules);
+            }
+            this.sensitiveFields = fields;
+            this.fieldKeepRules = rules;
+        }
+        this.globalKeepRule = maskKeepHead >= 0 || maskKeepTail >= 0
+                ? new int[] {Math.max(0, maskKeepHead), Math.max(0, maskKeepTail)}
+                : null;
+        this.exactMatch = exactMatch;
         this.maskStatementVisitor = new MaskStatementVisitor();
         this.maskSelectVisitor = new MaskSelectVisitor();
         this.maskExpressionVisitor = new MaskExpressionVisitor();
         this.maskExpressionVisitor.setSelectVisitor(this.maskSelectVisitor);
+    }
+
+    /**
+     * 解析一个敏感字段条目：无 {@code :} 时整条（转小写）作为字段名；有 {@code :} 时按 {@code 列名:首:尾} 解析
+     */
+    private static void parseFieldEntry(String entry, Set<String> fields, Map<String, int[]> rules) {
+        if (entry.indexOf(':') < 0) {
+            // 将敏感字段转换为小写以确保大小写不敏感
+            fields.add(entry.toLowerCase());
+            return;
+        }
+        String[] parts = entry.split(":", -1);
+        if (parts.length != 3 || parts[0].isBlank()) {
+            throw new IllegalArgumentException("Invalid sensitive field rule (expected column:head:tail): " + entry);
+        }
+        String name = parts[0].trim().toLowerCase();
+        int[] rule = new int[] {parseKeepCount(parts[1], entry), parseKeepCount(parts[2], entry)};
+        int[] prev = rules.put(name, rule);
+        if (prev != null && ! Arrays.equals(prev, rule)) {
+            throw new IllegalArgumentException("Conflicting sensitive field rules for column: " + name);
+        }
+        fields.add(name);
+    }
+
+    private static int parseKeepCount(String s, String entry) {
+        String t = s.trim();
+        if (! t.matches("\\d+")) {
+            throw new IllegalArgumentException("Invalid sensitive field rule (head/tail must be non-negative integers): " + entry);
+        }
+        try {
+            return Integer.parseInt(t);
+        } catch (NumberFormatException e) {
+            throw new IllegalArgumentException("Invalid sensitive field rule (head/tail out of range): " + entry, e);
+        }
     }
 
     /**
@@ -161,15 +239,65 @@ public class SqlMasker {
             // Return the modified SQL statement
             return statement.toString();
         } catch (JSQLParserException e) {
-            LOGGER.warn("Failed to mask sensitive fields in SQL: {}", sql, e);
-            return sql;
+            // 不打原 SQL 和异常 message（message 会回显出错 token，可能含敏感值），只记异常类名；
+            // 单参数 warn(String) 不做占位符 / format 处理，原样输出
+            LOGGER.warn("Failed to parse SQL for masking, masked all string literals instead: " + e.getClass().getName());
+            return maskAllStringLiterals(sql, this.maskPattern);
         }
+    }
+
+    /**
+     * 解析失败时的兜底：把 SQL 中所有字符串字面值 {@code '...'} 整段替换成 {@code '} + maskPattern + {@code '}。<br/>
+     * 扫描规则：遇 {@code '} 进入字面值；字面值内 {@code \} 加下一个字符视为转义；{@code ''} 视为转义引号；
+     * 单个 {@code '} 结束字面值；未闭合的字面值掩到结尾。
+     * @param sql 输入的 SQL 语句
+     * @param maskPattern 脱敏模式
+     * @return 所有字符串字面值都被掩掉的 SQL
+     */
+    static String maskAllStringLiterals(String sql, String maskPattern) {
+        String mask = maskPattern == null ? "" : maskPattern;
+        int len = sql.length();
+        StringBuilder sb = new StringBuilder(len);
+        int i = 0;
+        while (i < len) {
+            char c = sql.charAt(i);
+            if (c != '\'') {
+                sb.append(c);
+                i++;
+                continue;
+            }
+            // 进入字面值
+            sb.append('\'').append(mask);
+            i++;
+            boolean closed = false;
+            while (i < len) {
+                char ch = sql.charAt(i);
+                if (ch == '\\') {
+                    i += 2;
+                } else if (ch == '\'') {
+                    if (i + 1 < len && sql.charAt(i + 1) == '\'') {
+                        i += 2;
+                    } else {
+                        i++;
+                        closed = true;
+                        break;
+                    }
+                } else {
+                    i++;
+                }
+            }
+            if (closed) {
+                sb.append('\'');
+            }
+        }
+        return sb.toString();
     }
 
     /**
      * 快速检查 SQL 是否包含任意敏感字段名（不区分大小写）
      * 即使是误判（例如注释中包含，或者单词子串包含）也无所谓，只要不漏判即可，
-     * 这样可以过滤掉绝大部分无关 SQL，大幅提升性能。
+     * 这样可以过滤掉绝大部分无关 SQL，大幅提升性能。<br/>
+     * 精确匹配模式下改为标识符边界匹配：命中位置前后字符都不是 {@code [A-Za-z0-9_$]}。
      */
     private boolean containsAnySensitiveField(String sql) {
         if (sensitiveFields == null || sensitiveFields.isEmpty() || sql == null) {
@@ -178,11 +306,53 @@ public class SqlMasker {
         // 转换为全小写进行匹配（假设 sensitiveFields 构造时已转为小写）
         String lowerSql = sql.toLowerCase();
         for (String field : sensitiveFields) {
-            if (lowerSql.contains(field)) {
+            if (exactMatch ? containsAsIdentifier(lowerSql, field) : lowerSql.contains(field)) {
                 return true;
             }
         }
         return false;
+    }
+
+    /**
+     * text 中是否有一处 word 出现，且其前后字符都不是标识符字符
+     */
+    private static boolean containsAsIdentifier(String text, String word) {
+        if (word.isEmpty()) {
+            return false;
+        }
+        int idx = text.indexOf(word);
+        while (idx >= 0) {
+            int end = idx + word.length();
+            if ((idx == 0 || ! isIdentifierChar(text.charAt(idx - 1)))
+                    && (end == text.length() || ! isIdentifierChar(text.charAt(end)))) {
+                return true;
+            }
+            idx = text.indexOf(word, idx + 1);
+        }
+        return false;
+    }
+
+    private static boolean isIdentifierChar(char c) {
+        return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '$';
+    }
+
+    /**
+     * 去掉列名两侧的引号字符 {@code ` " [ ]}
+     */
+    static String stripIdentifierQuotes(String name) {
+        int start = 0;
+        int end = name.length();
+        while (start < end && isQuoteChar(name.charAt(start))) {
+            start++;
+        }
+        while (end > start && isQuoteChar(name.charAt(end - 1))) {
+            end--;
+        }
+        return name.substring(start, end);
+    }
+
+    private static boolean isQuoteChar(char c) {
+        return c == '`' || c == '"' || c == '[' || c == ']';
     }
 
     /**
@@ -557,17 +727,32 @@ public class SqlMasker {
     }
 
     /**
-     * 判断字段名是否是敏感字段（不区分大小写，且支持部分匹配）
+     * 找出列名命中的敏感字段（不区分大小写）。<br/>
+     *  - 精确匹配模式：列名去掉两侧引号后与敏感字段相等才命中 <br/>
+     *  - 子串匹配模式：列名包含敏感字段即命中；命中多个时取与列名（去掉两侧引号）相等的那个，
+     *    没有相等的取最长的那个（等长时取字典序小的，保证结果确定）
      * @param lowerCaseFieldName 小写的字段名
-     * @return                   是否是敏感字段
+     * @return                   命中的敏感字段，未命中返回 null
      */
-    private boolean isSensitiveField(String lowerCaseFieldName) {
+    private String matchSensitiveField(String lowerCaseFieldName) {
+        String bareName = stripIdentifierQuotes(lowerCaseFieldName);
+        if (exactMatch) {
+            return sensitiveFields.contains(bareName) ? bareName : null;
+        }
+        String best = null;
         for (String field : sensitiveFields) {
-            if (lowerCaseFieldName.contains(field)) {
-                return true;
+            if (! lowerCaseFieldName.contains(field)) {
+                continue;
+            }
+            if (field.equals(bareName)) {
+                return field;
+            }
+            if (best == null || field.length() > best.length()
+                    || (field.length() == best.length() && field.compareTo(best) < 0)) {
+                best = field;
             }
         }
-        return false;
+        return best;
     }
 
     /**
@@ -580,9 +765,14 @@ public class SqlMasker {
      *    - 如果为其他字符，表示like有转义字符，转义字符是该字符
      */
     private void maskFieldValueIfSensitive(Column column, Expression expr, String escapeCharInLikeExpr) {
-        if (column == null || ! isSensitiveField(column.getColumnName().toLowerCase())) {
+        if (column == null) {
             return;
         }
+        String matchedField = matchSensitiveField(column.getColumnName().toLowerCase());
+        if (matchedField == null) {
+            return;
+        }
+        int[] columnRule = fieldKeepRules.get(matchedField);
 
         // 递归解包 Parenthesis
         // 针对 VALUES ('3') 被解析为 Parenthesis -> StringValue 的情况
@@ -593,9 +783,21 @@ public class SqlMasker {
 
         if (expr instanceof StringValue stringValue) {
             stringValue.setValue(escapeCharInLikeExpr != null
-                    ? maskLikeValue(stringValue.getValue(), escapeCharInLikeExpr)
-                    : maskSensitiveValue(stringValue.getValue()));
+                    ? maskLikeValue(stringValue.getValue(), escapeCharInLikeExpr, columnRule)
+                    : maskColumnValue(stringValue.getValue(), columnRule));
         }
+    }
+
+    /**
+     * 按列规则对值进行mask：列有 {@code 列名:首:尾} 后缀时按该后缀保留首尾，否则走 {@link #maskSensitiveValue(String)}
+     * @param value      字段值
+     * @param columnRule 列的 {首, 尾} 保留规则，null 表示该列没有后缀
+     * @return mask后的值
+     */
+    private String maskColumnValue(String value, int[] columnRule) {
+        return columnRule != null
+                ? doKeepMask(value, this.maskPattern, columnRule[0], columnRule[1])
+                : maskSensitiveValue(value);
     }
 
     /**
@@ -606,6 +808,14 @@ public class SqlMasker {
      * @return          脱敏后的值
      */
     String maskLikeValue(String likeValue, String escapeStr) {
+        return maskLikeValue(likeValue, escapeStr, null);
+    }
+
+    /**
+     * 同 {@link #maskLikeValue(String, String)}，中间部分按列规则mask
+     * @param columnRule 列的 {首, 尾} 保留规则，null 表示该列没有后缀
+     */
+    private String maskLikeValue(String likeValue, String escapeStr, int[] columnRule) {
         if (likeValue == null || likeValue.isEmpty()) {
             return likeValue;
         }
@@ -656,19 +866,45 @@ public class SqlMasker {
         end = lastLiteralEnd;
 
         // 中间部分进行mask
-        String maskedValue = start < end ? maskSensitiveValue(likeValue.substring(start, end)) : "";
+        String maskedValue = start < end ? maskColumnValue(likeValue.substring(start, end), columnRule) : "";
 
         // 拼接前缀、mask后的中间部分、后缀
         return likeValue.substring(0, start) + maskedValue + likeValue.substring(end);
     }
 
     /**
-     * 对(敏感)字段值进行mask
+     * 对(敏感)字段值进行mask：启用了全局首尾保留规则时按 {@link #doKeepMask(String, String, int, int)}，
+     * 否则按 {@link #doValueMask(String, String)}
      * @param field 字段值
      * @return mask后的值
      */
     protected String maskSensitiveValue(String field) {
-        return doValueMask(field, this.maskPattern);
+        return globalKeepRule != null
+                ? doKeepMask(field, this.maskPattern, globalKeepRule[0], globalKeepRule[1])
+                : doValueMask(field, this.maskPattern);
+    }
+
+    /**
+     * 按首尾保留位数对(敏感)字段值进行mask <br/>
+     *    mask规则：<br/>
+     *      1. 如果value长度 <= head + tail，输出 maskPattern <br/>
+     *      2. 否则输出 value[0, head) + maskPattern + value[len - tail, len)，中间只放一份 maskPattern，不按长度填充 <br/>
+     *         比如：head=0, tail=4: '6222021234567890' => '****7890'；head=tail=0 时整值输出 maskPattern <br/>
+     * @param value 原始值
+     * @param maskPattern mask模式, 如"***", "####", "????", "*#?●○"
+     * @param head 首部保留位数（非负）
+     * @param tail 尾部保留位数（非负）
+     * @return mask后的值
+     */
+    static String doKeepMask(String value, String maskPattern, int head, int tail) {
+        if (value == null || maskPattern == null || maskPattern.isEmpty()) {
+            return value;
+        }
+        int len = value.length();
+        if (len <= head + tail) {
+            return maskPattern;
+        }
+        return value.substring(0, head) + maskPattern + value.substring(len - tail);
     }
 
     /**
