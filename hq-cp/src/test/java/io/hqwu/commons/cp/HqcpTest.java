@@ -11,6 +11,8 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
 import java.lang.reflect.Field;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Proxy;
 import java.sql.*;
 import java.util.Properties;
 import java.util.Queue;
@@ -671,15 +673,17 @@ public class HqcpTest {
     @Test
     public void testConnectionIdleAndRealClose() throws Exception {
         MockConnection mockConnection2 = createNiceMock(MockConnection.class);
-        //mockConnection2 should be real closed.
-        mockConnection2.close();
-        expectLastCall().once();
         expect(mockConnection2.createStatement()).andReturn(mockStatement).anyTimes();
         makeThreadSafe(mockConnection2, true);
         replay(mockConnection2);
 
+        // 两条物理连接各套一层 close 计数：#0 由构造器同步建出，必然拿第 1 个 answer（mockConnection）；
+        // 但 Monitor 启动时可能抢先建出 #1 压到栈顶，使 conn1/conn2 拿到哪条不固定，所以不能写死 mockConnection2。
+        AtomicInteger closes1 = new AtomicInteger();
+        AtomicInteger closes2 = new AtomicInteger();
         answer = mocksControl.createMock(MockJDBCAnswer.class);
-        expect(answer.answer()).andReturn(mockConnection).once().andReturn(mockConnection2).once();
+        expect(answer.answer()).andReturn(closeCounting(mockConnection, closes1)).once()
+                .andReturn(closeCounting(mockConnection2, closes2)).once();
         mocksControl.replay();
         driver = MockJDBCDriver.getInstance().setMockJDBCAnswer(answer);
         connPool = new Hqcp(config);
@@ -687,6 +691,16 @@ public class HqcpTest {
         //create 2 connections
         Connection conn1 = connPool.getConnection();
         Connection conn2 = connPool.getConnection();
+        // 按 conn2 实际拿到的连接名（HQCP#N#0 / HQCP#N#1）确定它背后是哪个 mock
+        final String conn2Name = conn2.toString();
+        final boolean conn2IsFirst;
+        if (conn2Name.startsWith(connPool.getPoolName() + "#0{")) {
+            conn2IsFirst = true;
+        } else if (conn2Name.startsWith(connPool.getPoolName() + "#1{")) {
+            conn2IsFirst = false;
+        } else {
+            throw new AssertionError("unexpected connection name: " + conn2Name);
+        }
         conn2.close();
 
         LOGGER.info("conn2 back to pool. now wait conn1 back to pool... 1 sec");
@@ -698,9 +712,37 @@ public class HqcpTest {
         assertEquals(1, connPool.getActiveConnectionsCount());
         assertEquals(1, connPool.getIdleConnectionsCount());
 
-        //verify mockConnection2.close() is be called
-        verify(mockConnection2);
+        //conn2 背后的 mock 应已被真正关闭一次，conn1 背后的 mock 不应被关闭
+        AtomicInteger reapedCloses = conn2IsFirst ? closes1 : closes2;
+        AtomicInteger keptCloses = conn2IsFirst ? closes2 : closes1;
+        assertEquals(1, reapedCloses.get(), conn2Name + " should be real closed once");
+        assertEquals(0, keptCloses.get(), "the other connection should not be closed");
 
+    }
+
+    /**
+     * 用 JDK Proxy 包一层，统计真实 close() 的调用次数，其余调用原样转给 target
+     */
+    private static Connection closeCounting(Connection target, AtomicInteger closes) {
+        return (Connection) Proxy.newProxyInstance(Connection.class.getClassLoader(), new Class<?>[]{Connection.class},
+                (proxy, method, args) -> {
+                    switch (method.getName()) {
+                        case "equals":
+                            return proxy == args[0];
+                        case "hashCode":
+                            return System.identityHashCode(proxy);
+                        case "close":
+                            closes.incrementAndGet();
+                            break;
+                        default:
+                            break;
+                    }
+                    try {
+                        return method.invoke(target, args);
+                    } catch (InvocationTargetException e) {
+                        throw e.getCause();
+                    }
+                });
     }
 
     @Test
