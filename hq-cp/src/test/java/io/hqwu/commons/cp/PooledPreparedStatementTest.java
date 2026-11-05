@@ -3,10 +3,15 @@ package io.hqwu.commons.cp;
 import io.hqwu.commons.cp.util.SqlMasker;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.MethodSource;
 
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.util.Set;
+import java.util.stream.Stream;
 
 import static org.easymock.EasyMock.*;
 import static org.junit.jupiter.api.Assertions.*;
@@ -455,17 +460,117 @@ class PooledPreparedStatementTest {
         proxy.setInt(4, 7);
 
         String debugSql = pooledPstmt.getSqlDoing();
-        assertEquals("UPDATE users SET name = 'O''Brien-Smith', password = 'C:\\\\pw\\\\it''s-a-secret',"
-                + " flag = '''' WHERE id = 7", debugSql.trim());
+        assertEquals("UPDATE users SET name = 'O\\'Brien-Smith', password = 'C:\\\\pw\\\\it\\'s-a-secret',"
+                + " flag = '\\'' WHERE id = 7", debugSql.trim());
 
         SqlMasker masker = new SqlMasker("****", java.util.Set.of("name", "password"));
         String masked = masker.maskSensitiveFields(debugSql);
         assertFalse(masked.contains("Brien-Smith"), masked);
         assertFalse(masked.contains("secret"), masked);
         assertTrue(masked.startsWith("UPDATE users SET name = '"), masked);
-        assertTrue(masked.contains(", flag = '''' WHERE id = 7"), masked);
+        assertTrue(masked.contains(", flag = '\\'' WHERE id = 7"), masked);
 
         verify(mockPooledConnection, mockRealPreparedStatement, mockResultSet);
+    }
+
+    /**
+     * 走构造器真实路径：sql 原样交给构造器，按顺序绑定 params 后取 getSqlDoing
+     */
+    private PooledPreparedStatement bindAll(String sql, Object... params) throws SQLException {
+        PooledConnection conn = createNiceMock(PooledConnection.class);
+        PreparedStatement realPstmt = createNiceMock(PreparedStatement.class);
+        expect(conn.getConnectionName()).andReturn("test-conn").anyTimes();
+        replay(conn, realPstmt);
+        PooledPreparedStatement pooledPstmt = new PooledPreparedStatement(conn, realPstmt, 120, new Object[]{sql});
+        PreparedStatement proxy = (PreparedStatement) pooledPstmt.checkOut();
+        for (int i = 0; i < params.length; i++) {
+            proxy.setObject(i + 1, params[i]);
+        }
+        return pooledPstmt;
+    }
+
+    /**
+     * 多行 SQL 里的 -- 行注释只到行尾，不吞掉后面的占位符；getPreparedSql 仍返回压平后的串
+     */
+    @Test
+    void testLineCommentEndsAtNewline() throws SQLException {
+        PooledPreparedStatement pstmt = bindAll("select * from t\n-- query by id\nwhere password = ? and id = ?",
+                "secret", 7);
+        assertEquals("select * from t -- query by id where password = 'secret' and id = 7 ", pstmt.getSqlDoing());
+        assertEquals("select * from t -- query by id where password = ? and id = ? ", pstmt.getPreparedSql());
+    }
+
+    @Test
+    void testTrailingLineCommentBetweenPlaceholders() throws SQLException {
+        PooledPreparedStatement pstmt = bindAll("select * from t where a = ? -- trailing\n and password = ?",
+                1, "line1\n  line2");
+        // 参数值本身不压平
+        assertEquals("select * from t where a = 1 -- trailing and password = 'line1\n  line2' ", pstmt.getSqlDoing());
+    }
+
+    /**
+     * 注释里的撇号不开启引号段，后面字面值里的 ? 也不当占位符
+     */
+    @Test
+    void testApostropheInLineCommentAndQuestionMarkInLiteral() throws SQLException {
+        PooledPreparedStatement pstmt = bindAll(
+                "select * from t\n-- it's by id\nwhere note = 'a?' and password = ? and id = ?", "secret", 7);
+        assertEquals("select * from t -- it's by id where note = 'a?' and password = 'secret' and id = 7 ",
+                pstmt.getSqlDoing());
+    }
+
+    /**
+     * 片段边界与整串压平一致：开头不留空白、结尾留一个空格，紧挨占位符处不加空格，原有空白处留一个空格
+     */
+    @Test
+    void testFragmentBoundariesMatchWholeFlatten() throws SQLException {
+        String sql = "  insert into t(a,b,c)\n\tvalues (?,\n  ?,?)  \n";
+        PooledPreparedStatement pstmt = bindAll(sql, "x", "y", 3);
+        assertEquals("insert into t(a,b,c) values ('x', 'y',3) ", pstmt.getSqlDoing());
+        // 末段为空 / 全空白、中间段为空 / 全空白
+        assertEquals("a=NULL ", bindAll("a=?", (Object) null).getSqlDoing());
+        assertEquals("a=NULL ", bindAll("a=?\n\n", (Object) null).getSqlDoing());
+        assertEquals("x NULLNULL ", bindAll("x ??", null, null).getSqlDoing());
+        assertEquals("x NULL NULL ", bindAll("x ?\n\t?", null, null).getSqlDoing());
+    }
+
+    static Stream<Arguments> inlineValues() {
+        return Stream.of(
+                Arguments.of("O'Brien", "'O\\'Brien'"),
+                Arguments.of("a\\'b", "'a\\\\\\'b'"),
+                Arguments.of("\\'", "'\\\\\\''"),
+                Arguments.of("end\\'", "'end\\\\\\''"),
+                Arguments.of("C:\\path\\", "'C:\\\\path\\\\'"),
+                Arguments.of("x\\", "'x\\\\'"),
+                Arguments.of("a\\b'c", "'a\\\\b\\'c'"),
+                Arguments.of("{\"a\":\"x\\\"y\"}", "'{\"a\":\"x\\\\\"y\"}'"),
+                Arguments.of("''", "'\\'\\''"),
+                Arguments.of("\\\\", "'\\\\\\\\'"));
+    }
+
+    /**
+     * 含 ' 与 \ 的绑定值内联后 SqlMasker（开启反斜杠转义）能解析，同句敏感列被掩，非敏感值原样保留
+     */
+    @ParameterizedTest
+    @MethodSource("inlineValues")
+    void testInlineEscapedValueParsesAndMasks(String value, String expectedLiteral) throws SQLException {
+        String debugSql = bindAll("UPDATE users SET note = ?, password = ? WHERE id = ?", value, "secret123", 7)
+                .getSqlDoing();
+        assertEquals("UPDATE users SET note = " + expectedLiteral + ", password = 'secret123' WHERE id = 7 ", debugSql);
+
+        String masked = new SqlMasker("****", Set.of("password")).maskSensitiveFields(debugSql);
+        assertEquals("UPDATE users SET note = " + expectedLiteral + ", password = 'sec****23' WHERE id = 7", masked);
+    }
+
+    /**
+     * 换成 \' 转义后，首尾保留仍按真实值计数：O'Brien\x 真实 9 位，保留首 1 尾 2
+     */
+    @Test
+    void testInlineEscapedValueKeepRuleCountsRealValue() throws SQLException {
+        String debugSql = bindAll("UPDATE users SET password = ? WHERE id = ?", "O'Brien\\x", 7).getSqlDoing();
+        assertEquals("UPDATE users SET password = 'O\\'Brien\\\\x' WHERE id = 7 ", debugSql);
+        String masked = new SqlMasker("****", Set.of("password:1:2")).maskSensitiveFields(debugSql);
+        assertEquals("UPDATE users SET password = 'O****\\\\x' WHERE id = 7", masked);
     }
 
     /**

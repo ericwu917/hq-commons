@@ -33,6 +33,8 @@ public class PooledPreparedStatement extends PooledStatement {
 
     private final PreparedStatement real_pstmt;
     
+    /** 未压平空白的原始预编译 SQL：占位符在它上面定位，行注释 {@code -- } 才能按换行正确结束 */
+    private final String rawSql;
     private final String preparedSql;
     private final Object[] paras;
 
@@ -45,7 +47,8 @@ public class PooledPreparedStatement extends PooledStatement {
         }
         String sql = (String) args[0];
         real_pstmt = (PreparedStatement) getStatement();
-        this.preparedSql = sql == null ? "" : JdbcUtil.removeBreakingWhitespace(sql);
+        this.rawSql = sql == null ? "" : sql;
+        this.preparedSql = JdbcUtil.removeBreakingWhitespace(this.rawSql);
         this.paras = new Object[getQMCount()];
     }
 
@@ -123,10 +126,12 @@ public class PooledPreparedStatement extends PooledStatement {
         if (paras.length == 0) {
             return preparedSql;
         }
-        StringBuilder sb = new StringBuilder(preparedSql.length() + paras.length * 16);
+        // 占位符在原始 SQL 上定位（压平后换行没了，行注释会一直延伸到串尾），
+        // 占位符之间的 SQL 片段各自压平空白，参数值本身不压平
+        StringBuilder sb = new StringBuilder(rawSql.length() + paras.length * 16);
         int idx = 0;
         for (Object p : paras) {
-            int idxNext = indexOfPlaceholder(preparedSql, idx);
+            int idxNext = indexOfPlaceholder(rawSql, idx);
 //            if (p == null) {
 //                idx = idxNext+1;
 //                continue;
@@ -134,21 +139,48 @@ public class PooledPreparedStatement extends PooledStatement {
             if (idxNext < 0) {
                 break;
             }
-            sb.append(preparedSql, idx, idxNext);
+            sb.append(flattenFragment(rawSql.substring(idx, idxNext), idx == 0, false));
             if (p == null) {
                 sb.append("NULL");
             } else if (ClassUtil.isPrimitiveOrWrapper(p.getClass()) && p.getClass() != Character.class) {
                 sb.append(p);
             } else {
-                // 先转义 \ 再转义 '，保证内联后的 SQL 能被 SqlMasker 正确解析（该串只用于日志）
-                String s = String.valueOf(p).replace("\\", "\\\\").replace("'", "''");
+                // 先转义 \ 再把 ' 转成 \'，保证内联后的 SQL 能被 SqlMasker（开启反斜杠转义）正确解析（该串只用于日志）；
+                // 用 '' 转义 ' 时，值里的 \' 会内联成 \\''，JSqlParser 解析失败
+                String s = String.valueOf(p).replace("\\", "\\\\").replace("'", "\\'");
                 sb.append('\'').append(s).append('\'');
             }
             idx = idxNext + 1;
         }
-        sb.append(preparedSql.substring(idx));
+        sb.append(flattenFragment(rawSql.substring(idx), idx == 0, true));
         sqlDoing = sb.toString();
         return sqlDoing;
+    }
+
+    /**
+     * 用 {@link JdbcUtil#removeBreakingWhitespace(String)} 压平占位符之间的一段 SQL，并修正片段边界，
+     * 使拼接结果与整串压平一致：整串开头不留空白、结尾留一个空格；片段中间的边界上，原来有空白的留一个空格，没有的不加
+     * @param fragment 片段原文
+     * @param first 是否整串的第一段
+     * @param last 是否整串的最后一段
+     * @return 压平后的片段
+     */
+    private static String flattenFragment(String fragment, boolean first, boolean last) {
+        String flat = JdbcUtil.removeBreakingWhitespace(fragment);
+        if (flat.isEmpty()) {
+            // 空串或全是空白
+            return (first || (!last && fragment.isEmpty())) ? "" : " ";
+        }
+        if (!last && !isBreakingWhitespace(fragment.charAt(fragment.length() - 1))) {
+            // removeBreakingWhitespace 总在末尾补一个空格，片段后面紧跟参数值时去掉
+            flat = flat.substring(0, flat.length() - 1);
+        }
+        return (!first && isBreakingWhitespace(fragment.charAt(0))) ? " " + flat : flat;
+    }
+
+    /** 与 {@link java.util.StringTokenizer} 默认分隔符一致 */
+    private static boolean isBreakingWhitespace(char c) {
+        return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f';
     }
 
     /**

@@ -1153,4 +1153,29 @@ class SqlMaskerTest {
         }
     }
 
+    /**
+     * 超长 OR 链让 visitor 递归栈溢出时不抛给业务，原样返回 SQL。<br/>
+     * 用指定小栈的线程跑，保证稳定触发
+     */
+    @Test
+    void testStackOverflowReturnsRawSql() throws InterruptedException {
+        StringBuilder sb = new StringBuilder("UPDATE t SET password = 'x' WHERE id = 0");
+        for (int i = 1; i < 3000; i++) {
+            sb.append(" OR id = ").append(i);
+        }
+        String sql = sb.toString();
+        SqlMasker masker = new SqlMasker(maskPattern, Set.of("password"));
+        Object[] result = new Object[1];
+        Thread t = new Thread(null, () -> {
+            try {
+                result[0] = masker.maskSensitiveFields(sql);
+            } catch (Throwable e) {
+                result[0] = e;
+            }
+        }, "small-stack-masker", 256 * 1024);
+        t.start();
+        t.join();
+        assertEquals(sql, result[0]);
+    }
+
 }

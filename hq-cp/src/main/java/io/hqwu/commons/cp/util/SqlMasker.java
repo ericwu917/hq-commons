@@ -240,8 +240,9 @@ public class SqlMasker {
             statement.accept(this.maskStatementVisitor);
             // Return the modified SQL statement
             return statement.toString();
-        } catch (JSQLParserException | RuntimeException e) {
-            // 解析失败或 visitor 遇到未覆盖的语句形态抛运行时异常时，原样返回 SQL，不影响业务（该串只用于日志）
+        } catch (JSQLParserException | RuntimeException | StackOverflowError e) {
+            // 解析失败、visitor 遇到未覆盖的语句形态抛运行时异常、或超长条件链（如上万项 OR）让 visitor 递归栈溢出时，
+            // 原样返回 SQL，不影响业务（该串只用于日志）
             LOGGER.warn("Failed to mask sensitive fields in SQL: {}", sql, e);
             return sql;
         }
