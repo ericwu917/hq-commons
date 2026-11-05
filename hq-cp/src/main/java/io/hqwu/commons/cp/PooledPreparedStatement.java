@@ -33,8 +33,6 @@ public class PooledPreparedStatement extends PooledStatement {
 
     private final PreparedStatement real_pstmt;
     
-    /** 未压平空白的原始预编译 SQL：占位符在它上面定位，行注释 {@code -- } 才能按换行正确结束 */
-    private final String rawSql;
     private final String preparedSql;
     private final Object[] paras;
 
@@ -47,8 +45,7 @@ public class PooledPreparedStatement extends PooledStatement {
         }
         String sql = (String) args[0];
         real_pstmt = (PreparedStatement) getStatement();
-        this.rawSql = sql == null ? "" : sql;
-        this.preparedSql = JdbcUtil.removeBreakingWhitespace(this.rawSql);
+        this.preparedSql = sql == null ? "" : JdbcUtil.removeBreakingWhitespace(sql);
         this.paras = new Object[getQMCount()];
     }
 
@@ -126,12 +123,10 @@ public class PooledPreparedStatement extends PooledStatement {
         if (paras.length == 0) {
             return preparedSql;
         }
-        // 占位符在原始 SQL 上定位（压平后换行没了，行注释会一直延伸到串尾），
-        // 占位符之间的 SQL 片段各自压平空白，参数值本身不压平
-        StringBuilder sb = new StringBuilder(rawSql.length() + paras.length * 16);
+        StringBuilder sb = new StringBuilder(preparedSql.length() + paras.length * 16);
         int idx = 0;
         for (Object p : paras) {
-            int idxNext = indexOfPlaceholder(rawSql, idx);
+            int idxNext = preparedSql.indexOf("?", idx);
 //            if (p == null) {
 //                idx = idxNext+1;
 //                continue;
@@ -139,7 +134,7 @@ public class PooledPreparedStatement extends PooledStatement {
             if (idxNext < 0) {
                 break;
             }
-            sb.append(flattenFragment(rawSql.substring(idx, idxNext), idx == 0, false));
+            sb.append(preparedSql, idx, idxNext);
             if (p == null) {
                 sb.append("NULL");
             } else if (ClassUtil.isPrimitiveOrWrapper(p.getClass()) && p.getClass() != Character.class) {
@@ -152,91 +147,8 @@ public class PooledPreparedStatement extends PooledStatement {
             }
             idx = idxNext + 1;
         }
-        sb.append(flattenFragment(rawSql.substring(idx), idx == 0, true));
+        sb.append(preparedSql.substring(idx));
         sqlDoing = sb.toString();
         return sqlDoing;
-    }
-
-    /**
-     * 用 {@link JdbcUtil#removeBreakingWhitespace(String)} 压平占位符之间的一段 SQL，并修正片段边界，
-     * 使拼接结果与整串压平一致：整串开头不留空白、结尾留一个空格；片段中间的边界上，原来有空白的留一个空格，没有的不加
-     * @param fragment 片段原文
-     * @param first 是否整串的第一段
-     * @param last 是否整串的最后一段
-     * @return 压平后的片段
-     */
-    private static String flattenFragment(String fragment, boolean first, boolean last) {
-        String flat = JdbcUtil.removeBreakingWhitespace(fragment);
-        if (flat.isEmpty()) {
-            // 空串或全是空白
-            return (first || (!last && fragment.isEmpty())) ? "" : " ";
-        }
-        if (!last && !isBreakingWhitespace(fragment.charAt(fragment.length() - 1))) {
-            // removeBreakingWhitespace 总在末尾补一个空格，片段后面紧跟参数值时去掉
-            flat = flat.substring(0, flat.length() - 1);
-        }
-        return (!first && isBreakingWhitespace(fragment.charAt(0))) ? " " + flat : flat;
-    }
-
-    /** 与 {@link java.util.StringTokenizer} 默认分隔符一致 */
-    private static boolean isBreakingWhitespace(char c) {
-        return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f';
-    }
-
-    /**
-     * 从 from 起找下一个占位符 {@code ?} 的下标，跳过以下位置里的 {@code ?}：<br/>
-     *  - 单引号字面值 {@code '...'}（含 {@code ''} 与 {@code \} 转义）<br/>
-     *  - 双引号 {@code "..."}（含 {@code ""} 与 {@code \} 转义）、反引号 {@code `...`}（含 {@code ``} 转义）<br/>
-     *  - 块注释 {@code /* ... *}{@code /}、行注释 {@code -- } 到行尾 <br/>
-     * 未闭合的引号 / 注释视为延伸到结尾
-     * @param sql  预编译 SQL
-     * @param from 起始下标
-     * @return 占位符下标，找不到返回 -1
-     */
-    static int indexOfPlaceholder(String sql, int from) {
-        int len = sql.length();
-        int i = from;
-        while (i < len) {
-            char c = sql.charAt(i);
-            if (c == '?') {
-                return i;
-            }
-            if (c == '\'' || c == '"' || c == '`') {
-                i = skipQuoted(sql, i, c);
-            } else if (c == '/' && i + 1 < len && sql.charAt(i + 1) == '*') {
-                int end = sql.indexOf("*/", i + 2);
-                i = end < 0 ? len : end + 2;
-            } else if (c == '-' && sql.startsWith("-- ", i)) {
-                int end = sql.indexOf('\n', i + 3);
-                i = end < 0 ? len : end + 1;
-            } else {
-                i++;
-            }
-        }
-        return -1;
-    }
-
-    /**
-     * 跳过从 start（开引号）起的引号段，返回闭引号之后的下标；成对引号视为转义，
-     * 单 / 双引号内 {@code \} 加下一个字符也视为转义（反引号内不算）
-     */
-    private static int skipQuoted(String sql, int start, char quote) {
-        int len = sql.length();
-        int i = start + 1;
-        while (i < len) {
-            char c = sql.charAt(i);
-            if (c == '\\' && quote != '`') {
-                i += 2;
-            } else if (c == quote) {
-                if (i + 1 < len && sql.charAt(i + 1) == quote) {
-                    i += 2;
-                } else {
-                    return i + 1;
-                }
-            } else {
-                i++;
-            }
-        }
-        return len;
     }
 }

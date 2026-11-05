@@ -489,51 +489,6 @@ class PooledPreparedStatementTest {
         return pooledPstmt;
     }
 
-    /**
-     * 多行 SQL 里的 -- 行注释只到行尾，不吞掉后面的占位符；getPreparedSql 仍返回压平后的串
-     */
-    @Test
-    void testLineCommentEndsAtNewline() throws SQLException {
-        PooledPreparedStatement pstmt = bindAll("select * from t\n-- query by id\nwhere password = ? and id = ?",
-                "secret", 7);
-        assertEquals("select * from t -- query by id where password = 'secret' and id = 7 ", pstmt.getSqlDoing());
-        assertEquals("select * from t -- query by id where password = ? and id = ? ", pstmt.getPreparedSql());
-    }
-
-    @Test
-    void testTrailingLineCommentBetweenPlaceholders() throws SQLException {
-        PooledPreparedStatement pstmt = bindAll("select * from t where a = ? -- trailing\n and password = ?",
-                1, "line1\n  line2");
-        // 参数值本身不压平
-        assertEquals("select * from t where a = 1 -- trailing and password = 'line1\n  line2' ", pstmt.getSqlDoing());
-    }
-
-    /**
-     * 注释里的撇号不开启引号段，后面字面值里的 ? 也不当占位符
-     */
-    @Test
-    void testApostropheInLineCommentAndQuestionMarkInLiteral() throws SQLException {
-        PooledPreparedStatement pstmt = bindAll(
-                "select * from t\n-- it's by id\nwhere note = 'a?' and password = ? and id = ?", "secret", 7);
-        assertEquals("select * from t -- it's by id where note = 'a?' and password = 'secret' and id = 7 ",
-                pstmt.getSqlDoing());
-    }
-
-    /**
-     * 片段边界与整串压平一致：开头不留空白、结尾留一个空格，紧挨占位符处不加空格，原有空白处留一个空格
-     */
-    @Test
-    void testFragmentBoundariesMatchWholeFlatten() throws SQLException {
-        String sql = "  insert into t(a,b,c)\n\tvalues (?,\n  ?,?)  \n";
-        PooledPreparedStatement pstmt = bindAll(sql, "x", "y", 3);
-        assertEquals("insert into t(a,b,c) values ('x', 'y',3) ", pstmt.getSqlDoing());
-        // 末段为空 / 全空白、中间段为空 / 全空白
-        assertEquals("a=NULL ", bindAll("a=?", (Object) null).getSqlDoing());
-        assertEquals("a=NULL ", bindAll("a=?\n\n", (Object) null).getSqlDoing());
-        assertEquals("x NULLNULL ", bindAll("x ??", null, null).getSqlDoing());
-        assertEquals("x NULL NULL ", bindAll("x ?\n\t?", null, null).getSqlDoing());
-    }
-
     static Stream<Arguments> inlineValues() {
         return Stream.of(
                 Arguments.of("O'Brien", "'O\\'Brien'"),
@@ -571,58 +526,6 @@ class PooledPreparedStatementTest {
         assertEquals("UPDATE users SET password = 'O\\'Brien\\\\x' WHERE id = 7 ", debugSql);
         String masked = new SqlMasker("****", Set.of("password:1:2")).maskSensitiveFields(debugSql);
         assertEquals("UPDATE users SET password = 'O****\\\\x' WHERE id = 7", masked);
-    }
-
-    /**
-     * 预编译 SQL 字面值里的 ? 不当占位符：绑定值内联到真正的占位符
-     */
-    @Test
-    void testSqlDoingSkipsQuestionMarkInLiteral() throws SQLException {
-        String sql = "select * from t where note = 'a?' and password = ?";
-
-        expect(mockPooledConnection.getConnectionName()).andReturn("test-conn").anyTimes();
-        expect(mockRealPreparedStatement.getResultSetType()).andReturn(ResultSet.TYPE_FORWARD_ONLY).anyTimes();
-        expect(mockRealPreparedStatement.getResultSetConcurrency()).andReturn(ResultSet.CONCUR_READ_ONLY).anyTimes();
-        mockRealPreparedStatement.setString(1, "123456");
-        expectLastCall().once();
-        replay(mockPooledConnection, mockRealPreparedStatement, mockResultSet);
-
-        PooledPreparedStatement pooledPstmt = new PooledPreparedStatement(
-                mockPooledConnection, mockRealPreparedStatement, 111, new Object[]{sql});
-        PreparedStatement proxy = (PreparedStatement) pooledPstmt.checkOut();
-        proxy.setString(1, "123456");
-
-        assertEquals("select * from t where note = 'a?' and password = '123456'", pooledPstmt.getSqlDoing().trim());
-
-        verify(mockPooledConnection, mockRealPreparedStatement, mockResultSet);
-    }
-
-    @Test
-    void testIndexOfPlaceholder() {
-        // 普通占位符、from 起点
-        assertEquals(4, PooledPreparedStatement.indexOfPlaceholder("a = ? and ?", 0));
-        assertEquals(10, PooledPreparedStatement.indexOfPlaceholder("a = ? and ?", 5));
-        assertEquals(-1, PooledPreparedStatement.indexOfPlaceholder("a = 1", 0));
-        // 单引号：含 '' 与 \ 转义
-        assertEquals(12, PooledPreparedStatement.indexOfPlaceholder("x = 'a?''?' ?", 0));
-        assertEquals(12, PooledPreparedStatement.indexOfPlaceholder("x = 'a\\'?b' ?", 0));
-        // 双引号：含 "" 与 \ 转义
-        assertEquals(12, PooledPreparedStatement.indexOfPlaceholder("x = \"a?\"\"?\" ?", 0));
-        assertEquals(12, PooledPreparedStatement.indexOfPlaceholder("x = \"a\\\"?b\" ?", 0));
-        // 反引号：含 `` 转义，\ 不转义
-        assertEquals(10, PooledPreparedStatement.indexOfPlaceholder("`a?``?` = ?", 0));
-        assertEquals(7, PooledPreparedStatement.indexOfPlaceholder("`a\\` = ?", 0));
-        // 块注释、行注释
-        assertEquals(14, PooledPreparedStatement.indexOfPlaceholder("x = /* ? */ 1 ?", 0));
-        assertEquals(14, PooledPreparedStatement.indexOfPlaceholder("x -- a ?\n y = ?", 0));
-        // -- 后不跟空格不是注释；单个 / 不是注释
-        assertEquals(4, PooledPreparedStatement.indexOfPlaceholder("x --? ", 0));
-        assertEquals(6, PooledPreparedStatement.indexOfPlaceholder("x / 2 ?", 0));
-        // 未闭合的引号 / 注释延伸到结尾
-        assertEquals(-1, PooledPreparedStatement.indexOfPlaceholder("x = 'a?", 0));
-        assertEquals(-1, PooledPreparedStatement.indexOfPlaceholder("x = 'a\\", 0));
-        assertEquals(-1, PooledPreparedStatement.indexOfPlaceholder("x = /* ?", 0));
-        assertEquals(-1, PooledPreparedStatement.indexOfPlaceholder("x -- ?", 0));
     }
 
     /**
