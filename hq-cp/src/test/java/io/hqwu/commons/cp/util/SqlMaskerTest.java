@@ -849,53 +849,24 @@ class SqlMaskerTest {
         }
 
         /**
-         * 解析失败兜底：返回值不含原字面值，WARN 不含原 SQL / 异常 message，只有异常类名
+         * visitor 抛运行时异常（INSERT 无列名 → insert.getColumns() 为 null）时不抛出，返回原 SQL
          */
         @Test
-        void testParseFailureMasksAllLiteralsAndLogsNoSql() {
-            String invalidSql = "UPDATE users SET password = 'secret123', note = 'It''s \\' ok' WHERE ((( id = 'x1";
-            ch.qos.logback.classic.Logger logger =
-                    (ch.qos.logback.classic.Logger) org.slf4j.LoggerFactory.getLogger(SqlMasker.class);
-            ch.qos.logback.core.read.ListAppender<ch.qos.logback.classic.spi.ILoggingEvent> appender =
-                    new ch.qos.logback.core.read.ListAppender<>();
-            appender.start();
-            logger.addAppender(appender);
-            ch.qos.logback.classic.Level oldLevel = logger.getLevel();
-            logger.setLevel(ch.qos.logback.classic.Level.WARN);
-            try {
-                String masked = sqlMasker.maskSensitiveFields(invalidSql);
-                assertEquals("UPDATE users SET password = '****', note = '****' WHERE ((( id = '****", masked);
-
-                assertEquals(1, appender.list.size());
-                ch.qos.logback.classic.spi.ILoggingEvent event = appender.list.get(0);
-                assertEquals(ch.qos.logback.classic.Level.WARN, event.getLevel());
-                String msg = event.getFormattedMessage();
-                assertTrue(msg.contains("JSQLParserException"), msg);
-                assertFalse(msg.contains("secret123"), msg);
-                assertFalse(msg.contains("UPDATE"), msg);
-                assertNull(event.getThrowableProxy());
-            } finally {
-                logger.detachAppender(appender);
-                logger.setLevel(oldLevel);
-            }
+        void testInsertWithoutColumnsReturnsOriginalSql() {
+            // 子串模式下表名 shipping 含 pin，快速检查命中后进入 visitor
+            SqlMasker masker = new SqlMasker("****", Set.of("pin"));
+            String sql = "INSERT INTO shipping_order VALUES (1,'abc')";
+            assertEquals(sql, assertDoesNotThrow(() -> masker.maskSensitiveFields(sql)));
         }
 
+        /**
+         * visitor 抛运行时异常（UPDATE 多列 = 子查询，按下标取值越界）时不抛出，返回原 SQL
+         */
         @Test
-        void testMaskAllStringLiterals() {
-            assertEquals("a = '##' and b = '##'", SqlMasker.maskAllStringLiterals("a = 'x' and b = 'y'", "##"));
-            // '' 转义引号、\ 转义
-            assertEquals("a = '##' x", SqlMasker.maskAllStringLiterals("a = 'It''s' x", "##"));
-            assertEquals("a = '##' x", SqlMasker.maskAllStringLiterals("a = 'It\\'s' x", "##"));
-            assertEquals("a = '##', '##'", SqlMasker.maskAllStringLiterals("a = 'c:\\\\', 'y'", "##"));
-            // 空字面值
-            assertEquals("a = '##'", SqlMasker.maskAllStringLiterals("a = ''", "##"));
-            // 未闭合掩到结尾（含以 \ 结尾）
-            assertEquals("a = '##", SqlMasker.maskAllStringLiterals("a = 'abc", "##"));
-            assertEquals("a = '##", SqlMasker.maskAllStringLiterals("a = 'abc\\", "##"));
-            // 无字面值原样
-            assertEquals("select 1", SqlMasker.maskAllStringLiterals("select 1", "##"));
-            // maskPattern 为 null 时字面值清空
-            assertEquals("a = ''", SqlMasker.maskAllStringLiterals("a = 'x'", null));
+        void testUpdateMultiColumnSubSelectReturnsOriginalSql() {
+            SqlMasker masker = new SqlMasker("****", Set.of("pin"));
+            String sql = "UPDATE t SET (a, pin) = (SELECT x, y FROM s)";
+            assertEquals(sql, assertDoesNotThrow(() -> masker.maskSensitiveFields(sql)));
         }
     }
 
@@ -1067,6 +1038,118 @@ class SqlMaskerTest {
             assertEquals("pin", SqlMasker.stripIdentifierQuotes("\"pin\""));
             assertEquals("", SqlMasker.stripIdentifierQuotes("``"));
             assertEquals("a`b", SqlMasker.stripIdentifierQuotes("a`b"));
+        }
+    }
+
+    /**
+     * 首尾保留位数溢出：head + tail 超出 int 范围时不抛异常，整值输出 maskPattern
+     */
+    @Nested
+    class KeepCountOverflow {
+        @Test
+        void testColumnRuleOverflow() {
+            SqlMasker masker = new SqlMasker("****", Set.of("pin:2147483647:1"));
+            assertEquals("UPDATE t SET pin = '****'", masker.maskSensitiveFields("UPDATE t SET pin = '123456'"));
+            // 含转义单元时同样不溢出
+            assertEquals("UPDATE t SET pin = '****'", masker.maskSensitiveFields("UPDATE t SET pin = '12''34'"));
+        }
+
+        @Test
+        void testGlobalRuleOverflow() {
+            SqlMasker masker = new SqlMasker("****", sensitiveFields, Integer.MAX_VALUE, 1, false);
+            assertEquals("UPDATE users SET password = '****'",
+                    masker.maskSensitiveFields("UPDATE users SET password = 'secret123'"));
+        }
+
+        @Test
+        void testStaticOverflow() {
+            assertEquals("**", SqlMasker.doKeepMask("123", "**", Integer.MAX_VALUE, 1));
+            assertEquals("**", SqlMasker.doKeepMask("123", "**", 1, Integer.MAX_VALUE));
+            assertEquals("**", SqlMasker.doKeepMaskOnLiteral("1''2", "**", Integer.MAX_VALUE, 1));
+        }
+    }
+
+    /**
+     * 首尾保留按真实值计数：'' 与 \x 各算一个字符，保留部分按原转义方式输出
+     */
+    @Nested
+    class KeepRuleOnEscapedLiteral {
+        private final Set<String> fields = new HashSet<>(Arrays.asList("card_no:0:4", "acct:2:2"));
+
+        @Test
+        void testQuoteEscapeNearThreshold() {
+            SqlMasker masker = new SqlMasker("****", fields);
+            // 真实值 1'2'（4 位）<= 0 + 4，整值全掩
+            assertEquals("UPDATE t SET card_no = '****'",
+                    masker.maskSensitiveFields("UPDATE t SET card_no = '1''2'''"));
+            // 真实值 x1'2'（5 位），保留尾 4 位 1'2'
+            assertEquals("UPDATE t SET card_no = '****1''2'''",
+                    masker.maskSensitiveFields("UPDATE t SET card_no = 'x1''2'''"));
+        }
+
+        @Test
+        void testQuoteEscapeNormalLength() {
+            SqlMasker masker = new SqlMasker("****", fields);
+            // 真实值 abc'd'12，尾 4 位 d'12
+            assertEquals("UPDATE t SET card_no = '****d''12'",
+                    masker.maskSensitiveFields("UPDATE t SET card_no = 'abc''d''12'"));
+            // 真实值 a'bcd'e，首 2 位 a'、尾 2 位 'e
+            assertEquals("UPDATE t SET acct = 'a''****''e'",
+                    masker.maskSensitiveFields("UPDATE t SET acct = 'a''bcd''e'"));
+        }
+
+        @Test
+        void testBackslashEscapeNearThreshold() {
+            SqlMasker masker = new SqlMasker("****", fields);
+            // 真实值 1\2'（4 位），整值全掩
+            assertEquals("UPDATE t SET card_no = '****'",
+                    masker.maskSensitiveFields("UPDATE t SET card_no = '1\\\\2\\''"));
+            // 真实值 x1\2'（5 位），保留尾 4 位 1\2'
+            assertEquals("UPDATE t SET card_no = '****1\\\\2\\''",
+                    masker.maskSensitiveFields("UPDATE t SET card_no = 'x1\\\\2\\''"));
+        }
+
+        @Test
+        void testBackslashEscapeNormalLength() {
+            SqlMasker masker = new SqlMasker("****", fields);
+            // 真实值 ab\cd'e，尾 4 位 cd'e
+            assertEquals("UPDATE t SET card_no = '****cd\\'e'",
+                    masker.maskSensitiveFields("UPDATE t SET card_no = 'ab\\\\cd\\'e'"));
+            // 真实值 \a12345'b，首 2 位 \a、尾 2 位 'b
+            assertEquals("UPDATE t SET acct = '\\\\a****\\'b'",
+                    masker.maskSensitiveFields("UPDATE t SET acct = '\\\\a12345\\'b'"));
+        }
+
+        @Test
+        void testGlobalRuleCountsRealValue() {
+            SqlMasker masker = new SqlMasker("****", sensitiveFields, 0, 4, false);
+            assertEquals("UPDATE users SET password = '****'",
+                    masker.maskSensitiveFields("UPDATE users SET password = '1''2'''"));
+            assertEquals("UPDATE users SET password = '****1''2'''",
+                    masker.maskSensitiveFields("UPDATE users SET password = 'x1''2'''"));
+        }
+
+        @Test
+        void testLikeMiddleCountsRealValue() {
+            SqlMasker masker = new SqlMasker("****", fields);
+            assertEquals("SELECT * FROM t WHERE card_no LIKE '%****'",
+                    masker.maskSensitiveFields("SELECT * FROM t WHERE card_no LIKE '%1''2'''"));
+            assertEquals("SELECT * FROM t WHERE card_no LIKE '%****1''2''%'",
+                    masker.maskSensitiveFields("SELECT * FROM t WHERE card_no LIKE '%x1''2''%'"));
+        }
+
+        @Test
+        void testDoKeepMaskOnLiteral() {
+            assertNull(SqlMasker.doKeepMaskOnLiteral(null, "**", 0, 1));
+            assertEquals("a''b", SqlMasker.doKeepMaskOnLiteral("a''b", null, 0, 1));
+            assertEquals("a''b", SqlMasker.doKeepMaskOnLiteral("a''b", "", 0, 1));
+            // 无转义单元，与 doKeepMask 一致
+            assertEquals("**90", SqlMasker.doKeepMaskOnLiteral("1234567890", "**", 0, 2));
+            // 末尾孤立的 \ 算一个字符
+            assertEquals("**\\", SqlMasker.doKeepMaskOnLiteral("a''b\\", "**", 0, 1));
+            // 末尾单个 '、后接非 ' 的单个 ' 各算一个字符
+            assertEquals("**b'", SqlMasker.doKeepMaskOnLiteral("a''b'", "**", 0, 2));
+            assertEquals("a'**", SqlMasker.doKeepMaskOnLiteral("a'b''", "**", 2, 0));
         }
     }
 

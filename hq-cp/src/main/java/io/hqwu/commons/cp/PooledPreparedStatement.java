@@ -126,7 +126,7 @@ public class PooledPreparedStatement extends PooledStatement {
         StringBuilder sb = new StringBuilder(preparedSql.length() + paras.length * 16);
         int idx = 0;
         for (Object p : paras) {
-            int idxNext = preparedSql.indexOf("?", idx);
+            int idxNext = indexOfPlaceholder(preparedSql, idx);
 //            if (p == null) {
 //                idx = idxNext+1;
 //                continue;
@@ -149,5 +149,62 @@ public class PooledPreparedStatement extends PooledStatement {
         sb.append(preparedSql.substring(idx));
         sqlDoing = sb.toString();
         return sqlDoing;
+    }
+
+    /**
+     * 从 from 起找下一个占位符 {@code ?} 的下标，跳过以下位置里的 {@code ?}：<br/>
+     *  - 单引号字面值 {@code '...'}（含 {@code ''} 与 {@code \} 转义）<br/>
+     *  - 双引号 {@code "..."}（含 {@code ""} 与 {@code \} 转义）、反引号 {@code `...`}（含 {@code ``} 转义）<br/>
+     *  - 块注释 {@code /* ... *}{@code /}、行注释 {@code -- } 到行尾 <br/>
+     * 未闭合的引号 / 注释视为延伸到结尾
+     * @param sql  预编译 SQL
+     * @param from 起始下标
+     * @return 占位符下标，找不到返回 -1
+     */
+    static int indexOfPlaceholder(String sql, int from) {
+        int len = sql.length();
+        int i = from;
+        while (i < len) {
+            char c = sql.charAt(i);
+            if (c == '?') {
+                return i;
+            }
+            if (c == '\'' || c == '"' || c == '`') {
+                i = skipQuoted(sql, i, c);
+            } else if (c == '/' && i + 1 < len && sql.charAt(i + 1) == '*') {
+                int end = sql.indexOf("*/", i + 2);
+                i = end < 0 ? len : end + 2;
+            } else if (c == '-' && sql.startsWith("-- ", i)) {
+                int end = sql.indexOf('\n', i + 3);
+                i = end < 0 ? len : end + 1;
+            } else {
+                i++;
+            }
+        }
+        return -1;
+    }
+
+    /**
+     * 跳过从 start（开引号）起的引号段，返回闭引号之后的下标；成对引号视为转义，
+     * 单 / 双引号内 {@code \} 加下一个字符也视为转义（反引号内不算）
+     */
+    private static int skipQuoted(String sql, int start, char quote) {
+        int len = sql.length();
+        int i = start + 1;
+        while (i < len) {
+            char c = sql.charAt(i);
+            if (c == '\\' && quote != '`') {
+                i += 2;
+            } else if (c == quote) {
+                if (i + 1 < len && sql.charAt(i + 1) == quote) {
+                    i += 2;
+                } else {
+                    return i + 1;
+                }
+            } else {
+                i++;
+            }
+        }
+        return len;
     }
 }

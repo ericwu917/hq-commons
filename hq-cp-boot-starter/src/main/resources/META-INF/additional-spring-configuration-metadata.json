@@ -151,7 +151,7 @@
     {
       "name": "spring.datasource.hqcp.sensitive-fields",
       "type": "java.util.Set<java.lang.String>",
-      "description": "敏感字段集。条目可带后缀 列名:首:尾（两个非负整数）指定该列的值保留首尾多少位、中间放一份 mask-pattern，如 bank_account:0:4；pin:0:0 表示整值全掩。无后缀的条目沿用全局规则；后缀格式不合法时启动报错",
+      "description": "敏感字段集。条目可带后缀 列名:首:尾（两个非负整数）指定该列的值保留首尾多少位、中间放一份 mask-pattern，如 bank_account:0:4；pin:0:0 表示整值全掩。无后缀的条目沿用全局规则（mask-keep-head / mask-keep-tail）；首尾保留位数按字面值还原转义后的真实字符计。后缀格式不合法（非整数、负数、段数不对）或同一列给了不同后缀时，绑定配置即抛 IllegalArgumentException，应用启动失败（与 init-on-startup 无关）",
       "sourceType": "io.hqwu.commons.cp.HqcpDataSourceBoot"
     },
     {

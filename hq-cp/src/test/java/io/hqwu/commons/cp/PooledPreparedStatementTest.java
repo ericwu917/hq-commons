@@ -469,6 +469,58 @@ class PooledPreparedStatementTest {
     }
 
     /**
+     * 预编译 SQL 字面值里的 ? 不当占位符：绑定值内联到真正的占位符
+     */
+    @Test
+    void testSqlDoingSkipsQuestionMarkInLiteral() throws SQLException {
+        String sql = "select * from t where note = 'a?' and password = ?";
+
+        expect(mockPooledConnection.getConnectionName()).andReturn("test-conn").anyTimes();
+        expect(mockRealPreparedStatement.getResultSetType()).andReturn(ResultSet.TYPE_FORWARD_ONLY).anyTimes();
+        expect(mockRealPreparedStatement.getResultSetConcurrency()).andReturn(ResultSet.CONCUR_READ_ONLY).anyTimes();
+        mockRealPreparedStatement.setString(1, "123456");
+        expectLastCall().once();
+        replay(mockPooledConnection, mockRealPreparedStatement, mockResultSet);
+
+        PooledPreparedStatement pooledPstmt = new PooledPreparedStatement(
+                mockPooledConnection, mockRealPreparedStatement, 111, new Object[]{sql});
+        PreparedStatement proxy = (PreparedStatement) pooledPstmt.checkOut();
+        proxy.setString(1, "123456");
+
+        assertEquals("select * from t where note = 'a?' and password = '123456'", pooledPstmt.getSqlDoing().trim());
+
+        verify(mockPooledConnection, mockRealPreparedStatement, mockResultSet);
+    }
+
+    @Test
+    void testIndexOfPlaceholder() {
+        // 普通占位符、from 起点
+        assertEquals(4, PooledPreparedStatement.indexOfPlaceholder("a = ? and ?", 0));
+        assertEquals(10, PooledPreparedStatement.indexOfPlaceholder("a = ? and ?", 5));
+        assertEquals(-1, PooledPreparedStatement.indexOfPlaceholder("a = 1", 0));
+        // 单引号：含 '' 与 \ 转义
+        assertEquals(12, PooledPreparedStatement.indexOfPlaceholder("x = 'a?''?' ?", 0));
+        assertEquals(12, PooledPreparedStatement.indexOfPlaceholder("x = 'a\\'?b' ?", 0));
+        // 双引号：含 "" 与 \ 转义
+        assertEquals(12, PooledPreparedStatement.indexOfPlaceholder("x = \"a?\"\"?\" ?", 0));
+        assertEquals(12, PooledPreparedStatement.indexOfPlaceholder("x = \"a\\\"?b\" ?", 0));
+        // 反引号：含 `` 转义，\ 不转义
+        assertEquals(10, PooledPreparedStatement.indexOfPlaceholder("`a?``?` = ?", 0));
+        assertEquals(7, PooledPreparedStatement.indexOfPlaceholder("`a\\` = ?", 0));
+        // 块注释、行注释
+        assertEquals(14, PooledPreparedStatement.indexOfPlaceholder("x = /* ? */ 1 ?", 0));
+        assertEquals(14, PooledPreparedStatement.indexOfPlaceholder("x -- a ?\n y = ?", 0));
+        // -- 后不跟空格不是注释；单个 / 不是注释
+        assertEquals(4, PooledPreparedStatement.indexOfPlaceholder("x --? ", 0));
+        assertEquals(6, PooledPreparedStatement.indexOfPlaceholder("x / 2 ?", 0));
+        // 未闭合的引号 / 注释延伸到结尾
+        assertEquals(-1, PooledPreparedStatement.indexOfPlaceholder("x = 'a?", 0));
+        assertEquals(-1, PooledPreparedStatement.indexOfPlaceholder("x = 'a\\", 0));
+        assertEquals(-1, PooledPreparedStatement.indexOfPlaceholder("x = /* ?", 0));
+        assertEquals(-1, PooledPreparedStatement.indexOfPlaceholder("x -- ?", 0));
+    }
+
+    /**
      * Test Case 9: Partial Parameters Logging
      * Requirement: getSqlDoing() should handle cases where not all parameters are set.
      */

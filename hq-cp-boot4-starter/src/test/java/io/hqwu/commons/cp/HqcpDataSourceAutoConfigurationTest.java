@@ -1,6 +1,7 @@
 package io.hqwu.commons.cp;
 
 import io.hqwu.commons.cp.autoconfigure.HqcpDataSourceAutoConfiguration;
+import io.hqwu.commons.cp.util.SqlMasker;
 import io.hqwu.commons.security.SecurityService;
 import io.hqwu.commons.security.SecurityServiceLocalImpl;
 import org.junit.jupiter.api.Test;
@@ -114,6 +115,45 @@ class HqcpDataSourceAutoConfigurationTest {
                     assertThat(dataSource.getUsername()).isEqualTo("basic_user");
                     assertThat(dataSource.getPassword()).isEqualTo("basic_pass");
                     assertThat(dataSource.getUrl()).isEqualTo("jdbc:mysql://localhost:3306/basic");
+                });
+    }
+
+    @Test
+    void testMaskPropertiesBound() {
+        this.contextRunner
+                .withPropertyValues(
+                        "spring.datasource.url=jdbc:mysql://localhost:3306/test",
+                        "spring.datasource.hqcp.sensitive-fields=password,bank_account:0:4",
+                        "spring.datasource.hqcp.mask-keep-head=1",
+                        "spring.datasource.hqcp.mask-keep-tail=2",
+                        "spring.datasource.hqcp.sensitive-fields-exact-match=true"
+                )
+                .run(context -> {
+                    assertThat(context).hasNotFailed();
+                    var dataSource = context.getBean(HqcpDataSourceBoot.class);
+                    assertThat(dataSource.getSensitiveFields()).containsExactlyInAnyOrder("password", "bank_account:0:4");
+                    assertThat(dataSource.getMaskKeepHead()).isEqualTo(1);
+                    assertThat(dataSource.getMaskKeepTail()).isEqualTo(2);
+                    assertThat(dataSource.isSensitiveFieldsExactMatch()).isTrue();
+                    // 按绑定结果构造的 SqlMasker：按列后缀、全局首尾保留、精确匹配均生效
+                    SqlMasker masker = new SqlMasker(dataSource.getMaskPattern(), dataSource.getSensitiveFields(),
+                            dataSource.getMaskKeepHead(), dataSource.getMaskKeepTail(), dataSource.isSensitiveFieldsExactMatch());
+                    assertThat(masker.maskSensitiveFields(
+                            "UPDATE t SET bank_account = '6222021234567890', password = 'secret123', password_hint = 'abcdef'"))
+                            .isEqualTo("UPDATE t SET bank_account = '****7890', password = 's****23', password_hint = 'abcdef'");
+                });
+    }
+
+    @Test
+    void testIllegalSensitiveFieldSuffixFailsStartup() {
+        this.contextRunner
+                .withPropertyValues(
+                        "spring.datasource.url=jdbc:mysql://localhost:3306/test",
+                        "spring.datasource.hqcp.sensitive-fields=password,pin:a:0"
+                )
+                .run(context -> {
+                    assertThat(context).hasFailed();
+                    assertThat(context.getStartupFailure()).rootCause().isInstanceOf(IllegalArgumentException.class);
                 });
     }
 

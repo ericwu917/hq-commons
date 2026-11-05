@@ -283,6 +283,43 @@ public class HqcpConfigTest {
     }
 
     @Test
+    public void testSetSensitiveFieldsRejectsIllegalSuffix() {
+        java.util.Set<String> bad = new java.util.HashSet<>(java.util.Arrays.asList("password", "pin:a:0"));
+        assertThrows(IllegalArgumentException.class, () -> config.setSensitiveFields(bad));
+        // 不合法时不写入
+        assertTrue(config.getSensitiveFields().isEmpty());
+        // 同一列不同后缀
+        assertThrows(IllegalArgumentException.class, () -> config.setSensitiveFields(
+                new java.util.HashSet<>(java.util.Arrays.asList("pin:0:0", "PIN:0:4"))));
+        // 合法后缀与 null 可写入
+        config.setSensitiveFields(new java.util.HashSet<>(java.util.Arrays.asList("password", "pin:0:4")));
+        assertTrue(config.getSensitiveFields().contains("pin:0:4"));
+        config.setSensitiveFields(null);
+        assertNull(config.getSensitiveFields());
+    }
+
+    @Test
+    public void testJdbcSensitiveFieldsRejectsIllegalSuffix() {
+        prop.setProperty("jdbc.sensitive-fields", "password,pin:-1:0");
+        assertThrows(IllegalArgumentException.class, () -> config.setProperties(prop));
+        prop.setProperty("jdbc.sensitive-fields", "password,pin:0");
+        assertThrows(IllegalArgumentException.class, () -> config.setProperties(prop));
+    }
+
+    @Test
+    public void testJdbcBlankMaskPatternIgnored() throws Exception {
+        prop.setProperty("jdbc.mask-pattern", "");
+        config.setProperties(prop);
+        assertEquals("****", config.getMaskPattern());
+        prop.setProperty("jdbc.mask-pattern", "   ");
+        config.setProperties(prop);
+        assertEquals("****", config.getMaskPattern());
+        prop.setProperty("jdbc.mask-pattern", "##");
+        config.setProperties(prop);
+        assertEquals("##", config.getMaskPattern());
+    }
+
+    @Test
     public void testSensitiveFieldsWithSpaces() throws Exception {
         // 测试包含空格的情况
         prop.setProperty("jdbc.sensitive-fields", " password , mobile , idCard ");

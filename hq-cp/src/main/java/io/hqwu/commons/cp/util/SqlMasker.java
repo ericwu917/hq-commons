@@ -89,7 +89,9 @@ import java.util.Set;
  *     - 转义符(') MySQL转义符(\) 当成普通字符处理，即忽略语义层面的字符串；<br/>
  *          比如：VALUES('''1234567') - 语义层面是长度为8的字符串 "'1234567"，<br/>
  *               但脱敏时按长度为9的字符串处理，脱敏结果为：VALUES('''1****67')，<br/>
- *               可能导致输出的SQL不是合法的。（仅用于日志脱敏，故暂忽略）
+ *               可能导致输出的SQL不是合法的。（仅用于日志脱敏，故暂忽略）<br/>
+ *          按首尾保留规则（列名:首:尾 后缀、全局 mask-keep-head / mask-keep-tail）脱敏时例外：按真实值计数，
+ *          保留部分按原转义方式输出，见 {@link #doKeepMaskOnLiteral(String, String, int, int)}
  * @author taige (Wu, Hongqiang)
  * @since 2025-03-11
  */
@@ -238,59 +240,28 @@ public class SqlMasker {
             statement.accept(this.maskStatementVisitor);
             // Return the modified SQL statement
             return statement.toString();
-        } catch (JSQLParserException e) {
-            // 不打原 SQL 和异常 message（message 会回显出错 token，可能含敏感值），只记异常类名；
-            // 单参数 warn(String) 不做占位符 / format 处理，原样输出
-            LOGGER.warn("Failed to parse SQL for masking, masked all string literals instead: " + e.getClass().getName());
-            return maskAllStringLiterals(sql, this.maskPattern);
+        } catch (JSQLParserException | RuntimeException e) {
+            // 解析失败或 visitor 遇到未覆盖的语句形态抛运行时异常时，原样返回 SQL，不影响业务（该串只用于日志）
+            LOGGER.warn("Failed to mask sensitive fields in SQL: {}", sql, e);
+            return sql;
         }
     }
 
     /**
-     * 解析失败时的兜底：把 SQL 中所有字符串字面值 {@code '...'} 整段替换成 {@code '} + maskPattern + {@code '}。<br/>
-     * 扫描规则：遇 {@code '} 进入字面值；字面值内 {@code \} 加下一个字符视为转义；{@code ''} 视为转义引号；
-     * 单个 {@code '} 结束字面值；未闭合的字面值掩到结尾。
-     * @param sql 输入的 SQL 语句
-     * @param maskPattern 脱敏模式
-     * @return 所有字符串字面值都被掩掉的 SQL
+     * 校验敏感字段条目（含 {@code 列名:首:尾} 后缀）是否合法，规则与构造函数一致。<br/>
+     * 供配置写入时提前校验，使非法配置在配置期即失败
+     * @param sensitiveFields 敏感字段集合，null 视为合法
+     * @throws IllegalArgumentException 条目后缀格式不合法（非整数、负数、段数不对），或同一列给了不同的后缀
      */
-    static String maskAllStringLiterals(String sql, String maskPattern) {
-        String mask = maskPattern == null ? "" : maskPattern;
-        int len = sql.length();
-        StringBuilder sb = new StringBuilder(len);
-        int i = 0;
-        while (i < len) {
-            char c = sql.charAt(i);
-            if (c != '\'') {
-                sb.append(c);
-                i++;
-                continue;
-            }
-            // 进入字面值
-            sb.append('\'').append(mask);
-            i++;
-            boolean closed = false;
-            while (i < len) {
-                char ch = sql.charAt(i);
-                if (ch == '\\') {
-                    i += 2;
-                } else if (ch == '\'') {
-                    if (i + 1 < len && sql.charAt(i + 1) == '\'') {
-                        i += 2;
-                    } else {
-                        i++;
-                        closed = true;
-                        break;
-                    }
-                } else {
-                    i++;
-                }
-            }
-            if (closed) {
-                sb.append('\'');
-            }
+    public static void validateSensitiveFields(Set<String> sensitiveFields) {
+        if (sensitiveFields == null) {
+            return;
         }
-        return sb.toString();
+        Set<String> fields = new HashSet<>();
+        Map<String, int[]> rules = new HashMap<>();
+        for (String entry : sensitiveFields) {
+            parseFieldEntry(entry, fields, rules);
+        }
     }
 
     /**
@@ -796,7 +767,7 @@ public class SqlMasker {
      */
     private String maskColumnValue(String value, int[] columnRule) {
         return columnRule != null
-                ? doKeepMask(value, this.maskPattern, columnRule[0], columnRule[1])
+                ? doKeepMaskOnLiteral(value, this.maskPattern, columnRule[0], columnRule[1])
                 : maskSensitiveValue(value);
     }
 
@@ -873,15 +844,59 @@ public class SqlMasker {
     }
 
     /**
-     * 对(敏感)字段值进行mask：启用了全局首尾保留规则时按 {@link #doKeepMask(String, String, int, int)}，
+     * 对(敏感)字段值进行mask：启用了全局首尾保留规则时按 {@link #doKeepMaskOnLiteral(String, String, int, int)}，
      * 否则按 {@link #doValueMask(String, String)}
-     * @param field 字段值
+     * @param field 字段值（SQL 字面值的原始串）
      * @return mask后的值
      */
     protected String maskSensitiveValue(String field) {
         return globalKeepRule != null
-                ? doKeepMask(field, this.maskPattern, globalKeepRule[0], globalKeepRule[1])
+                ? doKeepMaskOnLiteral(field, this.maskPattern, globalKeepRule[0], globalKeepRule[1])
                 : doValueMask(field, this.maskPattern);
+    }
+
+    /**
+     * 同 {@link #doKeepMask(String, String, int, int)}，但 value 是 SQL 字符串字面值的原始串（未还原转义）：
+     * 按真实值的字符计数首尾保留位数，保留下来的部分按原转义方式原样输出。<br/>
+     * 转义单元：{@code ''} 是一个 {@code '}；{@code \x} 是一个 x（与 JSqlParser 开启反斜杠转义时一致）；
+     * 末尾孤立的 {@code \} 算一个字符；其余每个字符各算一个。<br/>
+     * 比如 head=0, tail=4: {@code 1''2''}（真实值 {@code 1'2'}，4 位）=> maskPattern；
+     *     {@code 12''345''6}（真实值 {@code 12'345'6}）=> maskPattern + {@code 45''6}
+     * @param rawValue 字面值原始串
+     * @param maskPattern mask模式
+     * @param head 首部保留位数（非负）
+     * @param tail 尾部保留位数（非负）
+     * @return mask后的值
+     */
+    static String doKeepMaskOnLiteral(String rawValue, String maskPattern, int head, int tail) {
+        if (rawValue == null || maskPattern == null || maskPattern.isEmpty()) {
+            return rawValue;
+        }
+        int rawLen = rawValue.length();
+        // 每个真实字符在原始串中的起始下标，末尾追加 rawLen 作哨兵
+        int[] starts = new int[rawLen + 1];
+        int count = 0;
+        int i = 0;
+        while (i < rawLen) {
+            starts[count++] = i;
+            char c = rawValue.charAt(i);
+            if (c == '\\' && i + 1 < rawLen) {
+                i += 2;
+            } else if (c == '\'' && i + 1 < rawLen && rawValue.charAt(i + 1) == '\'') {
+                i += 2;
+            } else {
+                i++;
+            }
+        }
+        starts[count] = rawLen;
+        if (count == rawLen) {
+            // 没有转义单元，真实值与原始串一致
+            return doKeepMask(rawValue, maskPattern, head, tail);
+        }
+        if (count <= (long) head + tail) {
+            return maskPattern;
+        }
+        return rawValue.substring(0, starts[head]) + maskPattern + rawValue.substring(starts[count - tail]);
     }
 
     /**
@@ -901,7 +916,8 @@ public class SqlMasker {
             return value;
         }
         int len = value.length();
-        if (len <= head + tail) {
+        // 用 long 相加，避免 head + tail 溢出成负数
+        if (len <= (long) head + tail) {
             return maskPattern;
         }
         return value.substring(0, head) + maskPattern + value.substring(len - tail);

@@ -1,6 +1,7 @@
 package io.hqwu.commons.cp;
 
 import io.hqwu.commons.cp.util.JdbcUtil;
+import io.hqwu.commons.cp.util.SqlMasker;
 import io.hqwu.commons.security.SecurityService;
 import io.hqwu.commons.security.SecurityServiceLocalImpl;
 import io.hqwu.commons.util.Logger;
@@ -158,10 +159,9 @@ public class HqcpConfig implements HqcpConfigMBean {
      * 敏感字段集<br/>
      * 条目可带后缀 {@code 列名:首:尾}（两个非负整数）指定该列的值保留首尾多少位，中间放一份 maskPattern，
      * 如 {@code bank_account:0:4}；{@code pin:0:0} 表示整值全掩。无后缀的条目沿用全局规则（见 {@link #maskKeepHead}）。
-     * 后缀格式不合法时连接池初始化抛 {@link IllegalArgumentException}
+     * 后缀格式不合法时写入即抛 {@link IllegalArgumentException}（见 {@link #setSensitiveFields(Set)}）
      */
     @Getter
-    @Setter
     private Set<String> sensitiveFields = new HashSet<>();
 
     /**
@@ -482,6 +482,16 @@ public class HqcpConfig implements HqcpConfigMBean {
         }
     }
 
+    /**
+     * 设置敏感字段集，写入前按 {@link SqlMasker#validateSensitiveFields(Set)} 校验条目后缀
+     * @param sensitiveFields 敏感字段集
+     * @throws IllegalArgumentException 条目后缀格式不合法，或同一列给了不同的后缀
+     */
+    public void setSensitiveFields(Set<String> sensitiveFields) {
+        SqlMasker.validateSensitiveFields(sensitiveFields);
+        this.sensitiveFields = sensitiveFields;
+    }
+
     public void setIdleTimeoutSec(long idleTimeoutSec) {
         if (idleTimeoutSec < 10 || idleTimeoutSec > 3600)  {
             throw new IllegalArgumentException("idleTimeoutSec must be between 10 and 3600");
@@ -680,7 +690,7 @@ public class HqcpConfig implements HqcpConfigMBean {
         verbose = getBoolean(prop, "jdbc.verbose", verbose);
         printSql = getBoolean(prop, "jdbc.print-sql", printSql);
         maskSql = getBoolean(prop, "jdbc.mask-sql", maskSql);
-        maskPattern = prop.getProperty("jdbc.mask-pattern", maskPattern);
+        setMaskPattern(prop.getProperty("jdbc.mask-pattern", maskPattern));
         String sensitiveFieldsStr = prop.getProperty("jdbc.sensitive-fields");
         if (StringUtil.isNotBlank(sensitiveFieldsStr)) {
             Set<String> newSensitiveFields = new HashSet<>();
@@ -690,7 +700,7 @@ public class HqcpConfig implements HqcpConfigMBean {
                     newSensitiveFields.add(field.trim());
                 }
             }
-            this.sensitiveFields = newSensitiveFields;
+            setSensitiveFields(newSensitiveFields);
         }
         maskKeepHead = getInt(prop, "jdbc.mask-keep-head", maskKeepHead);
         maskKeepTail = getInt(prop, "jdbc.mask-keep-tail", maskKeepTail);

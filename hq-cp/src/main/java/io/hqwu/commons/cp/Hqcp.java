@@ -141,6 +141,11 @@ public class Hqcp implements HqcpMBean {
         if (this.config == null || this.config.getUrl() == null) {
             throw new SQLException("jdbc.url cannot be NULL");
         }
+        // 先于建连接等任何副作用构造：敏感字段后缀不合法时在这里抛 IllegalArgumentException，不会泄漏已建的连接
+        if (config.getSensitiveFields() != null && !config.getSensitiveFields().isEmpty()) {
+            this.sqlMasker = new SqlMasker(config.getMaskPattern(), config.getSensitiveFields(),
+                    config.getMaskKeepHead(), config.getMaskKeepTail(), config.isSensitiveFieldsExactMatch());
+        }
         if (config.getDriverClassName() != null) {
             try {
                 Class.forName(config.getDriverClassName());
@@ -190,11 +195,6 @@ public class Hqcp implements HqcpMBean {
             if (validConnectionNum.get() < config.getMinConnections()) {
                 newConnection(false);
             }
-        }
-
-        if (config.getSensitiveFields() != null && !config.getSensitiveFields().isEmpty()) {
-            this.sqlMasker = new SqlMasker(config.getMaskPattern(), config.getSensitiveFields(),
-                    config.getMaskKeepHead(), config.getMaskKeepTail(), config.isSensitiveFieldsExactMatch());
         }
 
         monitor = new CPMonitor();

@@ -1356,6 +1356,31 @@ public class HqcpTest {
     }
 
     /**
+     * Test: 敏感字段后缀不合法（绕过 setter 写入）时，init 在建任何连接之前抛 IllegalArgumentException
+     */
+    @Test
+    public void testInitPoolWithIllegalSuffixCreatesNoConnection() throws Exception {
+        AtomicInteger connects = new AtomicInteger();
+        driver = MockJDBCDriver.getInstance().setMockJDBCAnswer(() -> {
+            connects.incrementAndGet();
+            return new MockConnection();
+        });
+
+        HqcpConfig testConfig = new HqcpConfig();
+        testConfig.setUrl(MockConstant.MOCK_URL);
+        testConfig.setDriverClassName(MockJDBCDriver.class.getName());
+        testConfig.setUsername("test");
+        testConfig.setPassword("test");
+        testConfig.setMinConnections(1);
+        testConfig.setLazyInit(false);
+        testConfig.getSensitiveFields().add("password");
+        testConfig.getSensitiveFields().add("pin:x:0");
+
+        assertThrows(IllegalArgumentException.class, () -> new Hqcp(testConfig));
+        assertEquals(0, connects.get());
+    }
+
+    /**
      * Test: 掩码新配置（全局首尾保留、精确匹配）透传到 SqlMasker
      */
     @Test
