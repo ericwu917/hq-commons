@@ -14,6 +14,7 @@ import org.springframework.context.annotation.Configuration;
 
 import javax.sql.DataSource;
 import java.security.GeneralSecurityException;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -270,6 +271,87 @@ class HqcpDataSourceAutoConfigurationTest {
                     assertThat(context).hasFailed();
                     assertThat(context.getStartupFailure()).hasRootCauseInstanceOf(NoUniqueBeanDefinitionException.class);
                 });
+    }
+
+    @Test
+    void testPasswordDecryptorFailureWithBasicPasswordFailsStartup() {
+        this.contextRunner
+                .withUserConfiguration(FailingPasswordDecryptorConfiguration.class)
+                .withPropertyValues(
+                        "spring.datasource.url=jdbc:mysql://localhost:3306/test",
+                        "spring.datasource.password=vault:v1:cipher"
+                )
+                .run(context -> {
+                    assertThat(context).hasFailed();
+                    assertThat(context.getStartupFailure()).rootCause()
+                            .isInstanceOf(IllegalStateException.class).hasMessage("decrypt failed");
+                });
+    }
+
+    @Test
+    void testLaterPasswordKeyIgnoredForLegacyCipher() throws GeneralSecurityException {
+        // 兼容回归：绑定时口令先于 password-key，内置 AES 按旧版用回落密钥解密
+        String laterKey = new SecurityServiceLocalImpl().generateKey("AES", 128);
+        this.contextRunner
+                .withPropertyValues(
+                        "spring.datasource.url=jdbc:mysql://localhost:3306/test",
+                        "spring.datasource.hqcp.password=" + FALLBACK_KEY_CIPHER,
+                        "spring.datasource.hqcp.password-key=" + laterKey
+                )
+                .run(context -> {
+                    assertThat(context).hasNotFailed();
+                    var dataSource = context.getBean(HqcpDataSourceBoot.class);
+                    assertThat(dataSource.getPassword()).isEqualTo("aaaabbbbccccdddd");
+                });
+    }
+
+    @Test
+    void testRemoteSecurityServiceNotUsedForBoundPassword() {
+        // 兼容回归：hqcp.password 在绑定时即用本地实现解密，之后注入的远程 SecurityService 不参与
+        this.contextRunner
+                .withUserConfiguration(RecordingSecurityServiceConfiguration.class)
+                .withPropertyValues(
+                        "spring.datasource.url=jdbc:mysql://localhost:3306/test",
+                        "spring.datasource.hqcp.password=" + FALLBACK_KEY_CIPHER
+                )
+                .run(context -> {
+                    assertThat(context).hasNotFailed();
+                    var dataSource = context.getBean(HqcpDataSourceBoot.class);
+                    assertThat(dataSource.getPassword()).isEqualTo("aaaabbbbccccdddd");
+                    assertThat(context.getBean(RecordingSecurityService.class).decryptCalls.get()).isZero();
+                });
+    }
+
+    /**
+     * 用回落密钥（JDBC_SECRET_KEY 或内置默认密钥）加密的 "aaaabbbbccccdddd"
+     */
+    private static final String FALLBACK_KEY_CIPHER = "1f/CYgg/AZ+O7FbBVqy+kIIxMOp3URjSFomDmp8JlWM=";
+
+    @Configuration
+    static class RecordingSecurityServiceConfiguration {
+        @Bean
+        public RecordingSecurityService recordingSecurityService() {
+            return new RecordingSecurityService();
+        }
+    }
+
+    /**
+     * 记录 decryptByAES 调用次数的远程 SecurityService
+     */
+    static class RecordingSecurityService extends RemoteSecurityService {
+        final AtomicInteger decryptCalls = new AtomicInteger();
+
+        @Override
+        public byte[] decryptByAES(byte[] cipher, String keyAlias, String alg) {
+            decryptCalls.incrementAndGet();
+            return new byte[0];
+        }
+
+        @Override
+        public byte[] decryptByAES(String cipher, String keyAlias, String alg) {
+            decryptCalls.incrementAndGet();
+            return new byte[0];
+        }
     }
 
     @Configuration

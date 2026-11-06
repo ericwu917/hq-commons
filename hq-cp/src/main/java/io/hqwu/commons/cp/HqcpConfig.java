@@ -58,9 +58,10 @@ public class HqcpConfig implements HqcpConfigMBean {
      */
     private String password;
     /**
-     * 解密的口令，首次 {@link #getPassword()} 时惰性解密并缓存，{@link #setPassword(String)} 时清空
+     * 解密的口令：内置 AES 路径在 {@link #setPassword(String)} 时即时解密；
+     * 注入了 {@link PasswordDecryptor} 时在首次 {@link #getPassword()} 惰性解密并缓存
      */
-    private String decPassword;
+    private volatile String decPassword;
 
     /**
      * 池中最小连接数<br/>
@@ -411,11 +412,12 @@ public class HqcpConfig implements HqcpConfigMBean {
     }
 
     /**
-     * 获取用于连库的口令，首次调用时惰性解密并缓存。
+     * 获取用于连库的口令；尚无解密结果时惰性解密并缓存。
      * <ul>
      *   <li>口令为空返回 null；</li>
      *   <li>注入了 {@link PasswordDecryptor} 时用它解密：其异常原样外抛，返回 null 或空串时抛 {@link IllegalStateException}；</li>
-     *   <li>否则走内置 AES 启发式解密，非密文或解密失败时返回初始口令。</li>
+     *   <li>否则返回 {@link #setPassword(String)} 时内置 AES 启发式解密的结果；仅在解密器被置回 null 后
+     *       才在这里补做内置解密。非密文或解密失败时返回初始口令。</li>
      * </ul>
      * @return 解密后的密码或初始密码
      */
@@ -442,7 +444,9 @@ public class HqcpConfig implements HqcpConfigMBean {
     }
 
     /**
-     * 注入口令解密器，注入后完全取代内置 AES 启发式解密；已缓存的解密结果随之作废。
+     * 注入口令解密器，注入后完全取代内置 AES 启发式解密；本实例已缓存的解密结果随之作废。
+     * <p>注意：只在连接池首次取 {@link #getConnectionProperties()} 之前有效，之后口令已缓存进连接参数，
+     * 再注入解密器不会影响已建连接池使用的口令。</p>
      * @param passwordDecryptor 口令解密器，null 表示恢复内置解密
      */
     public void setPasswordDecryptor(PasswordDecryptor passwordDecryptor) {
@@ -479,9 +483,13 @@ public class HqcpConfig implements HqcpConfigMBean {
     }
 
     /**
-     * 设置加密或未加密的密码，只保存原值，解密推迟到首次 {@link #getPassword()}，
-     * 因此与 {@code passwordKey} / {@link SecurityService} / {@link PasswordDecryptor} 的设置先后无关。
-     * 如果密码为空，则直接返回，不进行后续处理。
+     * 设置加密或未加密的密码。如果密码为空，则直接返回，不进行后续处理。
+     * <ul>
+     *   <li>未注入 {@link PasswordDecryptor}：沿用旧语义，在本方法调用的那一刻用当时的 {@code passwordKey} /
+     *       {@link SecurityService} 做内置 AES 解密。{@code jdbc.password-key} 若晚于口令设置则不参与
+     *       （{@code setProperties} 与 Spring Boot 绑定下都是口令先于 password-key），这是兼容旧版的有意保留；</li>
+     *   <li>已注入 {@link PasswordDecryptor}：只保存原值，解密推迟到首次 {@link #getPassword()}。</li>
+     * </ul>
      * @param password 用户提供的密码，可能为加密或明文形式
      */
     public void setPassword(String password) {
@@ -489,7 +497,7 @@ public class HqcpConfig implements HqcpConfigMBean {
             return;
         }
         this.password = password;
-        this.decPassword = null;
+        this.decPassword = this.passwordDecryptor == null ? decryptPassword(password) : null;
     }
 
     public void setMinConnections(int minConnections) {

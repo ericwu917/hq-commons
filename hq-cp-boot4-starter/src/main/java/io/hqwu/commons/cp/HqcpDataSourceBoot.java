@@ -70,6 +70,10 @@ public class HqcpDataSourceBoot extends HqcpDataSource implements InitializingBe
         if (super.getUrl() == null) {
             super.setUrl(basicProperties.determineUrl());
         }
+        if (this.passwordDecryptor != null) {
+            // 触发解密器（含 spring.datasource.password 回落的口令），失败即启动失败
+            super.getPassword();
+        }
     }
 
     @Override

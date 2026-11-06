@@ -906,8 +906,8 @@ public class HqcpConfigTest {
     public void testPrintConfigHidesEncryptedPassword() throws Exception {
         String[] keyAndCipher = encryptWithNewKey("myCipherSecret");
         config.setUrl("jdbc:mysql://localhost/test");
-        config.setPassword(keyAndCipher[1]);
         config.setPasswordKey(keyAndCipher[0]);
+        config.setPassword(keyAndCipher[1]);
         assertEquals("myCipherSecret", config.getPassword());
 
         io.hqwu.commons.util.Logger logger = mock(io.hqwu.commons.util.Logger.class);
@@ -926,23 +926,43 @@ public class HqcpConfigTest {
         assertTrue(loggedText(logger).contains("password                = '******'"));
     }
 
+    /**
+     * 用回落密钥（JDBC_SECRET_KEY 或内置默认密钥）加密的 "aaaabbbbccccdddd"，与 testSetPassword 同源
+     */
+    private static final String FALLBACK_KEY_CIPHER = "1f/CYgg/AZ+O7FbBVqy+kIIxMOp3URjSFomDmp8JlWM=";
+
     @Test
-    public void testPasswordKeySetAfterPassword() throws Exception {
-        String[] keyAndCipher = encryptWithNewKey("orderSecret");
-        config.setPassword(keyAndCipher[1]);
-        config.setPasswordKey(keyAndCipher[0]);
-        assertEquals("orderSecret", config.getPassword());
-        assertEquals("orderSecret", config.getConnectionProperties().getProperty("password"));
+    public void testPasswordKeySetAfterPasswordKeepsLegacySemantics() throws Exception {
+        // 兼容回归：内置 AES 在 setPassword 那一刻用当时的密钥解密，晚设置的 password-key 不参与
+        String laterKey = new SecurityServiceLocalImpl().generateKey("AES", 128);
+        config.setPassword(FALLBACK_KEY_CIPHER);
+        config.setPasswordKey(laterKey);
+        assertEquals("aaaabbbbccccdddd", config.getPassword());
+        assertEquals("aaaabbbbccccdddd", config.getConnectionProperties().getProperty("password"));
     }
 
     @Test
-    public void testPasswordKeyFromPropertiesAfterPassword() throws Exception {
-        // setProperties 里 jdbc.password 先于 jdbc.password-key 设置
-        String[] keyAndCipher = encryptWithNewKey("propSecret");
-        prop.setProperty("jdbc.password", keyAndCipher[1]);
-        prop.setProperty("jdbc.password-key", keyAndCipher[0]);
+    public void testPasswordKeyFromPropertiesAfterPasswordKeepsLegacySemantics() throws Exception {
+        // 兼容回归：setProperties 里 jdbc.password 先于 jdbc.password-key 设置，后者不参与口令解密
+        String laterKey = new SecurityServiceLocalImpl().generateKey("AES", 128);
+        prop.setProperty("jdbc.password", FALLBACK_KEY_CIPHER);
+        prop.setProperty("jdbc.password-key", laterKey);
         config.setProperties(prop);
-        assertEquals("propSecret", config.getPassword());
+        assertEquals("aaaabbbbccccdddd", config.getPassword());
+        assertEquals(laterKey, config.getPasswordKey());
+    }
+
+    @Test
+    public void testHqcpInitFailsWhenPasswordDecryptorThrows() {
+        config.setDriverClassName(MockJDBCDriver.class.getName());
+        config.setUrl(MockConstant.MOCK_URL);
+        config.setPasswordDecryptor(p -> {
+            throw new IllegalStateException("decrypt failed");
+        });
+        config.setPassword("vault:v1:abc");
+        // 异常从初始化调用方抛出，未建连接、未起 monitor 线程
+        IllegalStateException e = assertThrows(IllegalStateException.class, () -> new Hqcp(config));
+        assertEquals("decrypt failed", e.getMessage());
     }
 
     @Test
@@ -967,8 +987,8 @@ public class HqcpConfigTest {
     @Test
     public void testPasswordDecryptorReplacesBuiltinAes() throws Exception {
         String[] keyAndCipher = encryptWithNewKey("aesSecret");
-        config.setPassword(keyAndCipher[1]);
         config.setPasswordKey(keyAndCipher[0]);
+        config.setPassword(keyAndCipher[1]);
         assertEquals("aesSecret", config.getPassword());
 
         // 注入后作废已缓存的结果，改由解密器处理原值

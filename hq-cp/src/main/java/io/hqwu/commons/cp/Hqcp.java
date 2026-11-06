@@ -162,6 +162,9 @@ public class Hqcp implements HqcpMBean {
             }
         }
         config.printConfig(LOGGER);
+        // 在建连接、起 monitor 线程之前触发口令解密：PasswordDecryptor 的异常从这里抛给初始化调用方，
+        // 不会落到 monitor 线程里被 catch 吞掉
+        config.getPassword();
         // 2025-03-04: 升级到 ojdbc17+ 后，不再需要针对 Oracle 10 的特殊缓存配置。
         // boolean isOracle10 = config.isOracle() && DriverManager.getDriver(config.getUrl()).getMajorVersion() == 10;
         // if (isOracle10 && config.isUseOracleImplicitCache()) {
