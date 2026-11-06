@@ -16,12 +16,17 @@ import net.sf.jsqlparser.statement.select.*;
 import net.sf.jsqlparser.statement.update.Update;
 import net.sf.jsqlparser.statement.update.UpdateSet;
 
+import java.security.AccessController;
+import java.security.PrivilegedAction;
 import java.util.Arrays;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * 基于 JSQLParser 实现的 SQL 敏感字段脱敏工具类。
@@ -97,6 +102,40 @@ import java.util.Set;
  */
 public class SqlMasker {
     private static final Logger LOGGER = new Logger();
+
+    /**
+     * 解析线程名前缀
+     */
+    static final String PARSER_THREAD_PREFIX = "SqlMasker-parser-";
+
+    private static final AtomicInteger PARSER_THREAD_NO = new AtomicInteger(0);
+
+    /**
+     * JSQLParser 解析用的类级共享线程池。<br/>
+     * {@code CCJSqlParserUtil.parse(sql, consumer)} 每次调用都会新建一个单线程池（即新建一个线程）再关掉，
+     * 这里改调带 {@link ExecutorService} 的重载复用线程，解析超时保护（{@code Feature.timeOut}）不变。<br/>
+     * 与 {@link Executors#newCachedThreadPool()} 相同的伸缩方式：并发脱敏各占一个线程、不被串行化，
+     * 某次解析超时卡住也不影响其他调用；线程空闲 60s 回收；daemon 线程，不阻止 JVM 退出
+     */
+    private static final ExecutorService PARSER_EXECUTOR = Executors.newCachedThreadPool(SqlMasker::newParserThread);
+
+    /**
+     * 解析线程工厂。<br/>
+     * 池是类级共享、从不 shutdown 的，线程由哪个业务线程触发创建并不确定：
+     * 不继承调用线程的 inheritable ThreadLocal，context ClassLoader 固定为本类的 ClassLoader，
+     * 避免共享 lib 部署时解析线程钉住某个（可能已卸载的）应用的 ClassLoader。<br/>
+     * JDK 17 上 {@code new Thread} 还会捕获创建时调用栈的 AccessControlContext（其 ProtectionDomain 持有调用方 ClassLoader），
+     * 故在 doPrivileged 里建线程，只捕获本类的 ProtectionDomain；JDK 24+ 已无该机制，doPrivileged 只是直接执行
+     */
+    @SuppressWarnings("removal")
+    static Thread newParserThread(Runnable r) {
+        String name = PARSER_THREAD_PREFIX + PARSER_THREAD_NO.incrementAndGet();
+        Thread t = AccessController.doPrivileged(
+                (PrivilegedAction<Thread>) () -> new Thread(null, r, name, 0, false));
+        t.setContextClassLoader(SqlMasker.class.getClassLoader());
+        t.setDaemon(true);
+        return t;
+    }
 
     /**
      * 脱敏模式，如"***", "####", "????", "*#?●○"
@@ -232,8 +271,8 @@ public class SqlMasker {
         }
 
         try {
-            // Parse SQL into a Statement object
-            Statement statement = CCJSqlParserUtil.parse(sql,
+            // Parse SQL into a Statement object（走共享线程池；简单模式失败后的复杂模式重试也在同一线程池里）
+            Statement statement = CCJSqlParserUtil.parse(sql, PARSER_EXECUTOR,
                     // 开启 MySQL 风格的反斜杠转义支持
                     parser -> parser.withBackslashEscapeCharacter(true));
             // Use a custom visitor to traverse and modify the SQL AST

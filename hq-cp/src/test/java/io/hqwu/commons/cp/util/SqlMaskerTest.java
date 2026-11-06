@@ -4,11 +4,33 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 
+import java.io.IOException;
+import java.io.InputStream;
+import java.net.URL;
+import java.net.URLClassLoader;
+import java.security.AccessControlContext;
+import java.security.AccessController;
+import java.security.CodeSource;
+import java.security.Permissions;
+import java.security.ProtectionDomain;
+import java.security.cert.Certificate;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashSet;
+import java.util.List;
+import java.util.Objects;
 import java.util.Set;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.BiFunction;
+import java.util.function.Function;
 
 import static org.junit.jupiter.api.Assertions.*;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 /**
  * Created with IntelliJ IDEA for hq-commons-parent
@@ -867,6 +889,198 @@ class SqlMaskerTest {
             SqlMasker masker = new SqlMasker("****", Set.of("pin"));
             String sql = "UPDATE t SET (a, pin) = (SELECT x, y FROM s)";
             assertEquals(sql, assertDoesNotThrow(() -> masker.maskSensitiveFields(sql)));
+        }
+    }
+
+    /**
+     * 用独立 ProtectionDomain 重新定义 {@link ParserThreadCaller} 的 ClassLoader，其余类委派给父加载器
+     */
+    static class AppLoader extends ClassLoader {
+        private final String callerName = ParserThreadCaller.class.getName();
+
+        AppLoader(ClassLoader parent) {
+            super(parent);
+        }
+
+        @Override
+        protected Class<?> loadClass(String name, boolean resolve) throws ClassNotFoundException {
+            if (! callerName.equals(name)) {
+                return super.loadClass(name, resolve);
+            }
+            synchronized (getClassLoadingLock(name)) {
+                Class<?> c = findLoadedClass(name);
+                if (c == null) {
+                    String resource = name.replace('.', '/') + ".class";
+                    try (InputStream in = getParent().getResourceAsStream(resource)) {
+                        byte[] bytes = Objects.requireNonNull(in, resource).readAllBytes();
+                        ProtectionDomain pd = new ProtectionDomain(
+                                new CodeSource(null, (Certificate[]) null), new Permissions(), this, null);
+                        c = defineClass(name, bytes, 0, bytes.length, pd);
+                    } catch (IOException e) {
+                        throw new ClassNotFoundException(name, e);
+                    }
+                }
+                return c;
+            }
+        }
+    }
+
+    /**
+     * 解析走类级共享线程池：不再每次 parse 新建线程
+     */
+    @Nested
+    class SharedParserExecutor {
+        private Set<Thread> parserThreads() {
+            Set<Thread> threads = new HashSet<>();
+            for (Thread t : Thread.getAllStackTraces().keySet()) {
+                if (t.getName().startsWith(SqlMasker.PARSER_THREAD_PREFIX)) {
+                    threads.add(t);
+                }
+            }
+            return threads;
+        }
+
+        @Test
+        void testRepeatedMaskReusesParserThreads() {
+            String sql = "UPDATE users SET password = 'new_password' WHERE id = 1";
+            String expected = "UPDATE users SET password = 'new_****word' WHERE id = 1";
+            // 简单模式失败后 JSqlParser 会以复杂模式再 parse 一次，两次都应走共享线程池，最终原样返回
+            String invalidSql = "This is not a valid SQL but contains password";
+            assertEquals(expected, sqlMasker.maskSensitiveFields(sql));
+            Set<Thread> before = parserThreads();
+            assertFalse(before.isEmpty(), "parse should run on the shared SqlMasker parser threads");
+
+            final int rounds = 20;
+            for (int i = 0; i < rounds; i++) {
+                assertEquals(expected, sqlMasker.maskSensitiveFields(sql));
+                assertEquals(invalidSql, sqlMasker.maskSensitiveFields(invalidSql));
+            }
+
+            Set<Thread> after = parserThreads();
+            after.removeAll(before);
+            // 原实现每次 parse 都新建线程（这里会是 60 个）；共享池顺序调用基本复用同一线程，
+            // 仅在 worker 尚未回到等待队列的瞬间才会多建，留足余量避免偶发
+            assertTrue(after.size() <= 10, "too many new parser threads: " + after.size());
+            for (Thread t : parserThreads()) {
+                assertTrue(t.isDaemon(), t.getName() + " should be daemon");
+            }
+        }
+
+        /**
+         * 解析线程不继承触发它的业务线程的 inheritable ThreadLocal 与 context ClassLoader
+         */
+        @Test
+        void testParserThreadDoesNotInheritCallerContext() throws Exception {
+            InheritableThreadLocal<String> itl = new InheritableThreadLocal<>();
+            AtomicReference<Thread> parserThread = new AtomicReference<>();
+            AtomicReference<String> seenItl = new AtomicReference<>("unset");
+            AtomicReference<ClassLoader> seenTccl = new AtomicReference<>();
+            AtomicReference<String> masked = new AtomicReference<>();
+            CountDownLatch done = new CountDownLatch(1);
+            try (URLClassLoader appLoader = new URLClassLoader(new URL[0], null)) {
+                Thread caller = new Thread(() -> {
+                    itl.set("caller-value");
+                    Thread.currentThread().setContextClassLoader(appLoader);
+                    // 直接在工厂产出的线程上断言：共享池里的线程可能早已建好，触发脱敏不一定会新建线程
+                    Thread t = SqlMasker.newParserThread(() -> {
+                        seenItl.set(itl.get());
+                        seenTccl.set(Thread.currentThread().getContextClassLoader());
+                        done.countDown();
+                    });
+                    parserThread.set(t);
+                    t.start();
+                    // 经共享池脱敏一次：此时池里的线程也都不应持有 appLoader
+                    masked.set(sqlMasker.maskSensitiveFields("UPDATE users SET password = 'new_password' WHERE id = 1"));
+                });
+                caller.start();
+                caller.join(TimeUnit.SECONDS.toMillis(30));
+                assertFalse(caller.isAlive());
+                assertTrue(done.await(10, TimeUnit.SECONDS));
+
+                assertEquals("UPDATE users SET password = 'new_****word' WHERE id = 1", masked.get());
+                assertNull(seenItl.get(), "parser thread should not inherit InheritableThreadLocal");
+                assertSame(SqlMasker.class.getClassLoader(), seenTccl.get());
+                assertTrue(parserThread.get().isDaemon());
+                assertTrue(parserThread.get().getName().startsWith(SqlMasker.PARSER_THREAD_PREFIX));
+                for (Thread t : parserThreads()) {
+                    assertSame(SqlMasker.class.getClassLoader(), t.getContextClassLoader(), t.getName());
+                }
+            }
+        }
+
+        /**
+         * JDK 17：解析线程不捕获调用栈上应用代码的 AccessControlContext。<br/>
+         * 私有字段 inheritedAccessControlContext 无 --add-opens 读不到，改用公开 API 比较：
+         * 线程内 {@code AccessController.getContext()} 等于自身栈帧的 PD 加上继承来的 PD，
+         * 由「应用代码」帧触发创建的线程与直接创建的线程，两者的 context 应相等（都只继承了 SqlMasker 的 PD）。
+         * JDK 24+ 已无该机制，跳过
+         */
+        @Test
+        @SuppressWarnings("removal")
+        void testParserThreadDoesNotCaptureCallerAccessControlContext() throws Exception {
+            assumeTrue(Runtime.version().feature() < 24, "AccessControlContext inheritance removed since JDK 24");
+
+            Function<Runnable, Thread> parserFactory = SqlMasker::newParserThread;
+            Function<Runnable, Thread> plainFactory = Thread::new;
+
+            // 对照：普通 new Thread 会把调用栈上应用代码的 PD 带进 context —— 证明这种比较能测出泄漏
+            assertNotEquals(contextOfThread(plainFactory, false), contextOfThread(plainFactory, true),
+                    "control: plain new Thread should capture the app domain on the caller stack");
+
+            assertEquals(contextOfThread(parserFactory, false), contextOfThread(parserFactory, true),
+                    "parser thread should not capture caller's AccessControlContext");
+        }
+
+        /**
+         * 用 factory 建线程，取线程内的 {@code AccessController.getContext()}
+         * @param viaApp true 时经独立 ProtectionDomain 的 {@link ParserThreadCaller} 帧调用 factory
+         */
+        @SuppressWarnings({"removal", "unchecked"})
+        private AccessControlContext contextOfThread(Function<Runnable, Thread> factory, boolean viaApp) throws Exception {
+            AtomicReference<AccessControlContext> ctx = new AtomicReference<>();
+            CountDownLatch done = new CountDownLatch(1);
+            Runnable task = () -> {
+                ctx.set(AccessController.getContext());
+                done.countDown();
+            };
+            Thread t;
+            if (viaApp) {
+                AppLoader appLoader = new AppLoader(SqlMaskerTest.class.getClassLoader());
+                Class<?> callerClass = appLoader.loadClass(ParserThreadCaller.class.getName());
+                assertSame(appLoader, callerClass.getProtectionDomain().getClassLoader());
+                BiFunction<Function<Runnable, Thread>, Runnable, Thread> caller =
+                        (BiFunction<Function<Runnable, Thread>, Runnable, Thread>) callerClass.getConstructor().newInstance();
+                t = caller.apply(factory, task);
+            } else {
+                t = factory.apply(task);
+            }
+            t.start();
+            assertTrue(done.await(10, TimeUnit.SECONDS));
+            return ctx.get();
+        }
+
+        @Test
+        void testConcurrentMask() throws Exception {
+            String sql = "UPDATE users SET password = 'new_password' WHERE id = 1";
+            String expected = "UPDATE users SET password = 'new_****word' WHERE id = 1";
+            final int n = 8;
+            ExecutorService pool = Executors.newFixedThreadPool(n);
+            try {
+                List<Future<String>> futures = new ArrayList<>();
+                CountDownLatch start = new CountDownLatch(1);
+                for (int i = 0; i < n; i++) {
+                    futures.add(pool.submit(() -> {
+                        start.await();
+                        return sqlMasker.maskSensitiveFields(sql);
+                    }));
+                }
+                start.countDown();
+                for (Future<String> f : futures) {
+                    assertEquals(expected, f.get(30, TimeUnit.SECONDS));
+                }
+            } finally {
+                pool.shutdownNow();
+            }
         }
     }
 
