@@ -631,6 +631,8 @@ public class HqcpTest {
         MockConnection mockConnection2 = mocksControl.createMock(MockConnection.class);
         mockConnection2.close();
         expectLastCall().times(4);
+        // Monitor 启动时可能抢先建出 #1（mockConnection2）压到栈顶，tearDown 取到的就是它，需能 createStatement
+        expect(mockConnection2.createStatement()).andReturn(mockStatement).anyTimes();
 
         answer = mocksControl.createMock(MockJDBCAnswer.class);
         expect(answer.answer()).andReturn(mockConnection).andReturn(mockConnection2).times(4);
