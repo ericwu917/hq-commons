@@ -121,20 +121,28 @@ public class HqcpTest {
 
     @AfterEach
     public void tearDown() throws SQLException {
-        if (connPool != null) {
-            if (! connPool.isShutdown()) {
-                Connection conn = connPool.getConnection();
-                Statement stmt = conn.createStatement();
-                stmt.executeUpdate("tearDown sql");
-                conn.close();
-                connPool.shutdown();
+        try {
+            if (connPool != null) {
+                try {
+                    if (! connPool.isShutdown()) {
+                        // 收尾任一步抛异常也必须关池，否则 CPM monitor 线程残留到 JVM 退出
+                        try (Connection conn = connPool.getConnection()) {
+                            Statement stmt = conn.createStatement();
+                            stmt.executeUpdate("tearDown sql");
+                        } finally {
+                            connPool.shutdown();
+                        }
+                    }
+                    mocksControl.verify();
+                } finally {
+                    connPool = null;
+                }
             }
-            mocksControl.verify();
-            connPool = null;
-        }
-        if (driver != null) {
-            driver.disable();
-            driver = null;
+        } finally {
+            if (driver != null) {
+                driver.disable();
+                driver = null;
+            }
         }
     }
 
