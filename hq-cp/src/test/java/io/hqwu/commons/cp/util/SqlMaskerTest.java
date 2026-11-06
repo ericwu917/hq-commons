@@ -4,12 +4,21 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 
+import java.io.IOException;
+import java.io.InputStream;
 import java.net.URL;
 import java.net.URLClassLoader;
+import java.security.AccessControlContext;
+import java.security.AccessController;
+import java.security.CodeSource;
+import java.security.Permissions;
+import java.security.ProtectionDomain;
+import java.security.cert.Certificate;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
@@ -17,8 +26,11 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.BiFunction;
+import java.util.function.Function;
 
 import static org.junit.jupiter.api.Assertions.*;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 /**
  * Created with IntelliJ IDEA for hq-commons-parent
@@ -881,6 +893,39 @@ class SqlMaskerTest {
     }
 
     /**
+     * 用独立 ProtectionDomain 重新定义 {@link ParserThreadCaller} 的 ClassLoader，其余类委派给父加载器
+     */
+    static class AppLoader extends ClassLoader {
+        private final String callerName = ParserThreadCaller.class.getName();
+
+        AppLoader(ClassLoader parent) {
+            super(parent);
+        }
+
+        @Override
+        protected Class<?> loadClass(String name, boolean resolve) throws ClassNotFoundException {
+            if (! callerName.equals(name)) {
+                return super.loadClass(name, resolve);
+            }
+            synchronized (getClassLoadingLock(name)) {
+                Class<?> c = findLoadedClass(name);
+                if (c == null) {
+                    String resource = name.replace('.', '/') + ".class";
+                    try (InputStream in = getParent().getResourceAsStream(resource)) {
+                        byte[] bytes = Objects.requireNonNull(in, resource).readAllBytes();
+                        ProtectionDomain pd = new ProtectionDomain(
+                                new CodeSource(null, (Certificate[]) null), new Permissions(), this, null);
+                        c = defineClass(name, bytes, 0, bytes.length, pd);
+                    } catch (IOException e) {
+                        throw new ClassNotFoundException(name, e);
+                    }
+                }
+                return c;
+            }
+        }
+    }
+
+    /**
      * 解析走类级共享线程池：不再每次 parse 新建线程
      */
     @Nested
@@ -961,6 +1006,57 @@ class SqlMaskerTest {
                     assertSame(SqlMasker.class.getClassLoader(), t.getContextClassLoader(), t.getName());
                 }
             }
+        }
+
+        /**
+         * JDK 17：解析线程不捕获调用栈上应用代码的 AccessControlContext。<br/>
+         * 私有字段 inheritedAccessControlContext 无 --add-opens 读不到，改用公开 API 比较：
+         * 线程内 {@code AccessController.getContext()} 等于自身栈帧的 PD 加上继承来的 PD，
+         * 由「应用代码」帧触发创建的线程与直接创建的线程，两者的 context 应相等（都只继承了 SqlMasker 的 PD）。
+         * JDK 24+ 已无该机制，跳过
+         */
+        @Test
+        @SuppressWarnings("removal")
+        void testParserThreadDoesNotCaptureCallerAccessControlContext() throws Exception {
+            assumeTrue(Runtime.version().feature() < 24, "AccessControlContext inheritance removed since JDK 24");
+
+            Function<Runnable, Thread> parserFactory = SqlMasker::newParserThread;
+            Function<Runnable, Thread> plainFactory = Thread::new;
+
+            // 对照：普通 new Thread 会把调用栈上应用代码的 PD 带进 context —— 证明这种比较能测出泄漏
+            assertNotEquals(contextOfThread(plainFactory, false), contextOfThread(plainFactory, true),
+                    "control: plain new Thread should capture the app domain on the caller stack");
+
+            assertEquals(contextOfThread(parserFactory, false), contextOfThread(parserFactory, true),
+                    "parser thread should not capture caller's AccessControlContext");
+        }
+
+        /**
+         * 用 factory 建线程，取线程内的 {@code AccessController.getContext()}
+         * @param viaApp true 时经独立 ProtectionDomain 的 {@link ParserThreadCaller} 帧调用 factory
+         */
+        @SuppressWarnings({"removal", "unchecked"})
+        private AccessControlContext contextOfThread(Function<Runnable, Thread> factory, boolean viaApp) throws Exception {
+            AtomicReference<AccessControlContext> ctx = new AtomicReference<>();
+            CountDownLatch done = new CountDownLatch(1);
+            Runnable task = () -> {
+                ctx.set(AccessController.getContext());
+                done.countDown();
+            };
+            Thread t;
+            if (viaApp) {
+                AppLoader appLoader = new AppLoader(SqlMaskerTest.class.getClassLoader());
+                Class<?> callerClass = appLoader.loadClass(ParserThreadCaller.class.getName());
+                assertSame(appLoader, callerClass.getProtectionDomain().getClassLoader());
+                BiFunction<Function<Runnable, Thread>, Runnable, Thread> caller =
+                        (BiFunction<Function<Runnable, Thread>, Runnable, Thread>) callerClass.getConstructor().newInstance();
+                t = caller.apply(factory, task);
+            } else {
+                t = factory.apply(task);
+            }
+            t.start();
+            assertTrue(done.await(10, TimeUnit.SECONDS));
+            return ctx.get();
         }
 
         @Test
