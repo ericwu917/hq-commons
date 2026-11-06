@@ -21,6 +21,8 @@ import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Properties;
+import java.util.Set;
+import java.util.stream.Collectors;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
@@ -960,9 +962,24 @@ public class HqcpConfigTest {
             throw new IllegalStateException("decrypt failed");
         });
         config.setPassword("vault:v1:abc");
-        // 异常从初始化调用方抛出，未建连接、未起 monitor 线程
+        // lazyInit + minConnections=0：initPool 不建初始连接，monitor 也无需补连接；
+        // 若没有 initPool 里那次显式 getPassword()，解密器不会在初始化期被调用，构造会成功
+        config.setLazyInit(true);
+        config.setMinConnections(0);
+        Set<String> monitorsBefore = monitorThreadNames();
+
+        // 异常从初始化调用方抛出，未起 monitor 线程
         IllegalStateException e = assertThrows(IllegalStateException.class, () -> new Hqcp(config));
         assertEquals("decrypt failed", e.getMessage());
+        assertEquals(monitorsBefore, monitorThreadNames());
+    }
+
+    private static Set<String> monitorThreadNames() {
+        return Thread.getAllStackTraces().keySet().stream()
+                .filter(Thread::isAlive)
+                .map(Thread::getName)
+                .filter(name -> name.startsWith("CPM:"))
+                .collect(Collectors.toSet());
     }
 
     @Test

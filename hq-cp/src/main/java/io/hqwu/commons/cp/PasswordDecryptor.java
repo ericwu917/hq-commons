@@ -6,6 +6,11 @@ package io.hqwu.commons.cp;
  * 注入后完全取代 hq-cp 内置的 AES 启发式解密（{@code jdbc.password-key} / {@code JDBC_SECRET_KEY}
  * 及内置默认密钥都不再参与），配置里的口令原值原样交给本接口处理。
  * </p>
+ * <p>
+ * 例外：Spring Boot 下口令配在 {@code spring.datasource.hqcp.password} 时，属性绑定期解密器尚未注入，
+ * 会先按内置 AES 启发式判断一次（结果随后被解密器覆盖）。密文是纯 Base64 形态时可能因此打出默认密钥 WARN
+ * 或调用 KeyManageService；{@code vault:v1:...} 这类带冒号的格式不是 Base64，不会触发。
+ * </p>
  * <ul>
  *   <li>入参是配置的口令原值，保证非空；</li>
  *   <li>返回值是实际用于连接数据库的明文口令，不可为 {@code null} 或空串，否则 hq-cp 抛 {@link IllegalStateException}；</li>
