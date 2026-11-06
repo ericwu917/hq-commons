@@ -22,6 +22,9 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * 基于 JSQLParser 实现的 SQL 敏感字段脱敏工具类。
@@ -97,6 +100,26 @@ import java.util.Set;
  */
 public class SqlMasker {
     private static final Logger LOGGER = new Logger();
+
+    /**
+     * 解析线程名前缀
+     */
+    static final String PARSER_THREAD_PREFIX = "SqlMasker-parser-";
+
+    private static final AtomicInteger PARSER_THREAD_NO = new AtomicInteger(0);
+
+    /**
+     * JSQLParser 解析用的类级共享线程池。<br/>
+     * {@code CCJSqlParserUtil.parse(sql, consumer)} 每次调用都会新建一个单线程池（即新建一个线程）再关掉，
+     * 这里改调带 {@link ExecutorService} 的重载复用线程，解析超时保护（{@code Feature.timeOut}）不变。<br/>
+     * 与 {@link Executors#newCachedThreadPool()} 相同的伸缩方式：并发脱敏各占一个线程、不被串行化，
+     * 某次解析超时卡住也不影响其他调用；线程空闲 60s 回收；daemon 线程，不阻止 JVM 退出
+     */
+    private static final ExecutorService PARSER_EXECUTOR = Executors.newCachedThreadPool(r -> {
+        Thread t = new Thread(r, PARSER_THREAD_PREFIX + PARSER_THREAD_NO.incrementAndGet());
+        t.setDaemon(true);
+        return t;
+    });
 
     /**
      * 脱敏模式，如"***", "####", "????", "*#?●○"
@@ -232,8 +255,8 @@ public class SqlMasker {
         }
 
         try {
-            // Parse SQL into a Statement object
-            Statement statement = CCJSqlParserUtil.parse(sql,
+            // Parse SQL into a Statement object（走共享线程池；简单模式失败后的复杂模式重试也在同一线程池里）
+            Statement statement = CCJSqlParserUtil.parse(sql, PARSER_EXECUTOR,
                     // 开启 MySQL 风格的反斜杠转义支持
                     parser -> parser.withBackslashEscapeCharacter(true));
             // Use a custom visitor to traverse and modify the SQL AST

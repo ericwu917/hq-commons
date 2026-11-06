@@ -4,9 +4,16 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Set;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -867,6 +874,72 @@ class SqlMaskerTest {
             SqlMasker masker = new SqlMasker("****", Set.of("pin"));
             String sql = "UPDATE t SET (a, pin) = (SELECT x, y FROM s)";
             assertEquals(sql, assertDoesNotThrow(() -> masker.maskSensitiveFields(sql)));
+        }
+    }
+
+    /**
+     * 解析走类级共享线程池：不再每次 parse 新建线程
+     */
+    @Nested
+    class SharedParserExecutor {
+        private Set<Thread> parserThreads() {
+            Set<Thread> threads = new HashSet<>();
+            for (Thread t : Thread.getAllStackTraces().keySet()) {
+                if (t.getName().startsWith(SqlMasker.PARSER_THREAD_PREFIX)) {
+                    threads.add(t);
+                }
+            }
+            return threads;
+        }
+
+        @Test
+        void testRepeatedMaskReusesParserThreads() {
+            String sql = "UPDATE users SET password = 'new_password' WHERE id = 1";
+            String expected = "UPDATE users SET password = 'new_****word' WHERE id = 1";
+            // 简单模式失败后 JSqlParser 会以复杂模式再 parse 一次，两次都应走共享线程池，最终原样返回
+            String invalidSql = "This is not a valid SQL but contains password";
+            assertEquals(expected, sqlMasker.maskSensitiveFields(sql));
+            Set<Thread> before = parserThreads();
+            assertFalse(before.isEmpty(), "parse should run on the shared SqlMasker parser threads");
+
+            final int rounds = 20;
+            for (int i = 0; i < rounds; i++) {
+                assertEquals(expected, sqlMasker.maskSensitiveFields(sql));
+                assertEquals(invalidSql, sqlMasker.maskSensitiveFields(invalidSql));
+            }
+
+            Set<Thread> after = parserThreads();
+            after.removeAll(before);
+            // 原实现每次 parse 都新建线程（这里会是 60 个）；共享池顺序调用基本复用同一线程，
+            // 仅在 worker 尚未回到等待队列的瞬间才会多建，留足余量避免偶发
+            assertTrue(after.size() <= 10, "too many new parser threads: " + after.size());
+            for (Thread t : parserThreads()) {
+                assertTrue(t.isDaemon(), t.getName() + " should be daemon");
+            }
+        }
+
+        @Test
+        void testConcurrentMask() throws Exception {
+            String sql = "UPDATE users SET password = 'new_password' WHERE id = 1";
+            String expected = "UPDATE users SET password = 'new_****word' WHERE id = 1";
+            final int n = 8;
+            ExecutorService pool = Executors.newFixedThreadPool(n);
+            try {
+                List<Future<String>> futures = new ArrayList<>();
+                CountDownLatch start = new CountDownLatch(1);
+                for (int i = 0; i < n; i++) {
+                    futures.add(pool.submit(() -> {
+                        start.await();
+                        return sqlMasker.maskSensitiveFields(sql);
+                    }));
+                }
+                start.countDown();
+                for (Future<String> f : futures) {
+                    assertEquals(expected, f.get(30, TimeUnit.SECONDS));
+                }
+            } finally {
+                pool.shutdownNow();
+            }
         }
     }
 
