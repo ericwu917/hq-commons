@@ -568,8 +568,22 @@ public class Hqcp implements HqcpMBean {
                                 break;
                             }
                         } else {
-                            //否则，（异步）检测该连接
-                            asyncCheckConnection(pc);
+                            //否则，（异步）检测该连接：
+                            //先从空闲栈摘出，校验期间借出方拿不到它（改拿其他空闲连接/新建/在 checkoutTimeout 内等待），
+                            //不会被卡在连接锁上，也不会一边校验一边被借出
+                            if (! idleConnectionsId.remove(connId)) {
+                                //已被借出方从栈中取走（正等待检出），不再检测
+                                //（池中连接按使用时间排序，后续连接肯定也是checkout状态，故）停止检测
+                                LOGGER.debug("connection {} is checking out, stop checking", pc.getConnectionName());
+                                break;
+                            }
+                            try {
+                                asyncCheckConnection(pc);
+                            } finally {
+                                //放回栈底：它比栈中其余未检查的连接都更久未用，它下面只可能是本轮先放回的、同样已到检测时间的连接，
+                                //不影响上面按使用时间排序的 break 判断
+                                idleConnectionsId.pushBottom(connId);
+                            }
                         }
                     } else {
                         //否则，更新下次检测间隔时间（取其中的最小值）
@@ -710,6 +724,19 @@ public class Hqcp implements HqcpMBean {
 
         public void push(E e) {
             stack.offerFirst(e); // 无锁操作，提高并发性
+            operLock.lock();
+            try {
+                notEmpty.signal(); // 通知有新元素可用
+            } finally {
+                operLock.unlock();
+            }
+        }
+
+        /**
+         * 放回栈底（最后才会被 pop 到），并通知等待方
+         */
+        public void pushBottom(E e) {
+            stack.offerLast(e);
             operLock.lock();
             try {
                 notEmpty.signal(); // 通知有新元素可用
