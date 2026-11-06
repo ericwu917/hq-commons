@@ -57,12 +57,12 @@ mvn verify                               # 含 JaCoCo 覆盖率门（见下）
 - **没有 `origin`**：全局 worktree hook 找不到 `origin/develop` 会退到当前 HEAD，开 worktree 前先 `git fetch ericwu917@github && git checkout develop && git pull`。本仓已设 `gh repo set-default ericwu917/hq-commons`、`remote.pushDefault` / `checkout.defaultRemote` = `ericwu917@github`。
 - **版本现状（2026-09-12）**：`develop` 是当前线（1.17.0-SNAPSHOT）。**最后一次 release 是 v1.4.0（2025-03-06）**，`master` 停在 `1.4.1-SNAPSHOT`；**1.5–1.16 不存在**（升 JDK 17 时按 minor 号规则直接跳到 `1.17.0-SNAPSHOT`），之后只发过 SNAPSHOT，下游全在吃它。下次 release 就是 1.17.0，develop → master 会是跨 1.4 → 1.17 的大合并。
 - **开发走 PR 模式（2026-11-06 起）**：从最新 develop 切 `feature/*` 分支开发，不在 develop 上直接提交；改完推分支、`gh pr create --base develop` 开 PR。**PR 创建后必须有一轮明确的 PR 评审**（按下面的独立评审规则，开 PR 前的本地评审不能代替）；评审通过、且 `pr-verify.yml` 在 PR 上跑的 `mvn verify`（只构建测试、不发布）是绿的，才在 GitHub 上合并 PR 到 develop。不在本地合 develop 再推——这样每次改动在 GitHub 上留有记录。PR 由 taige 合并（他明确说合才由 Claude `gh pr merge`）。
-- **独立评审规则**（纯文档 / 注释改动可免，PR 描述里写明）：
+- **独立评审规则**（每个 PR 都适用，只改文档 / 注释的 PR 也要评审，可以评得轻，但不能免）：
   - **谁评**：没参与编写的评审者（agent 或人），只读不改。给它需求原文、diff 范围、本次明确不修的已知问题；不给作者自己的结论。
   - **分级**：P0 阻断（数据错乱或丢失、安全、生产崩溃、断 SB3 / SB4 任一条线或公开 API）；P1 严重（常见路径的正确性或并发错误、未声明的行为变化）；P2 一般（边角场景、测试不稳定或覆盖缺口、小概率资源泄漏）；P3 建议（注释、风格、微优化）。每条带 `file#line`、触发条件、为什么是问题。
-  - **处置**：本次改动引入的 P0 / P1 必修；P2 默认修，不修写理由；P3 作者自定。改动前就存在的问题不扩范围，记待办，P0 级的报 taige。
-  - **复评**：修了 P0 / P1 的，修补要复评，直到不再有新的 P0 / P1，最多 3 轮；到顶说明方案本身有问题，停下回头重想并报 taige。只修了 P2 / P3 的不复评，作者自查加 `mvn verify` 即可。
-  - **通过与记录**：没有未处置的 P0 / P1、PR 上 `mvn verify` 绿即通过。评审结论（finding 表、各条处置、复评结果）用 `gh pr review <n> --comment` 贴成 PR review（同一账号不能 approve 自己的 PR，所以用 comment 类型）；修补推到同一 PR，复评结论同样贴 review。
+  - **处置**：本次改动引入的 P0 / P1 必修；P2 默认修，不修写理由；P3 作者自定。改动前就存在的问题不扩范围，写进 PR review 的「既有问题」一节留作待办记录，P0 级的报 taige。
+  - **复评**：修了 P0 / P1 的，修补推到同一 PR 后要复评，直到不再有新的 P0 / P1；首评加复评合计最多 3 轮；到顶说明方案本身有问题，停下回头重想并报 taige。只修了 P2 / P3 的不复评，作者自查加 `mvn verify` 即可。
+  - **通过与记录**：没有未处置的 P0 / P1、PR 上 `mvn verify` 绿即通过。首评的 finding 表与作者处置用 `gh pr review <n> --comment` 贴成一条 PR review（同一账号不能 approve 自己的 PR，所以用 comment 类型）；修补推上后，复评结论再贴一条 review。
 - **发布全靠 GitHub Actions，不在本地跑 release**：`feature/*` 经 PR 合到 `develop`（合并即推送，触发 `maven-snapshot.yml`：SNAPSHOT 发 GitHub Packages + Aliyun 云效）→ 把 develop 合到 `master` 推上去（触发 `maven-release.yml`：job 1 `release:prepare/perform` 打 tag `v<version>`、bump 下一个 SNAPSHOT、发 GitHub Packages；job 2 调 `maven-release-aliyun.yml` 按 tag 发 Aliyun）→ 手动 dispatch `maven-release-merge-to-develop.yml` 把 master ff-merge 回 develop。**Aliyun 那步失败只重跑它**：Re-run failed jobs，或手动 dispatch `maven-release-aliyun.yml` 填同一个 tag；别重跑整个 release，那会再切一个版本。
 - 发布产物两处：GitHub Packages（`maven.pkg.github.com/ericwu917/hq-commons`，pom 的 distributionManagement，含 sources jar）与 Aliyun 云效 packages（workflow 里用 `-Dalt*DeploymentRepository` 指过去）。业务仓从 Aliyun 拉。**Aliyun 有意不发 sources**：两条 Aliyun 步骤都是 `package deploy:deploy` 而非完整 `deploy`，就是为了跳过 verify 阶段的 source plugin，别"修"成 `deploy`。
 - **SNAPSHOT 不是终点**：下游要打 release tag 之前，本仓得先发 release 版本。
