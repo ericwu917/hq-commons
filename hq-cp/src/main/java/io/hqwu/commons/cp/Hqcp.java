@@ -569,8 +569,10 @@ public class Hqcp implements HqcpMBean {
                             }
                         } else {
                             //否则，（异步）检测该连接：
-                            //先从空闲栈摘出，校验期间借出方拿不到它（改拿其他空闲连接/新建/在 checkoutTimeout 内等待），
-                            //不会被卡在连接锁上，也不会一边校验一边被借出
+                            //先从空闲栈摘出，正常校验期间借出方拿不到它（改拿其他空闲连接/新建/在 checkoutTimeout 内等待），
+                            //不会被卡在连接锁上。
+                            //注意：校验超过 idleTimeout 时 asyncCheckConnection 会关闭连接，随后照样放回栈底，
+                            //但后台 helper 线程里的 doCheck 并未取消、可能仍在运行（既有问题，另行处理）
                             if (! idleConnectionsId.remove(connId)) {
                                 //已被借出方从栈中取走（正等待检出），不再检测
                                 //（池中连接按使用时间排序，后续连接肯定也是checkout状态，故）停止检测

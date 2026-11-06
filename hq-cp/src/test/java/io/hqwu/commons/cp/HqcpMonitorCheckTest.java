@@ -30,12 +30,26 @@ import static org.junit.jupiter.api.Assertions.*;
  */
 class HqcpMonitorCheckTest {
     private static final String CHECK_SQL = "SELECT 1 /* hqcp monitor check */";
-    private static final long CHECKOUT_TIMEOUT_MS = 500L;
+    private static final long CHECKOUT_TIMEOUT_MS = 200L;
+    /**
+     * 测试 monitor 等校验结果的上限（idleTimeout，同时也是空闲连接到检测时间的间隔）
+     */
+    private static final long IDLE_TIMEOUT_SEC = 2L;
+    /**
+     * 等借出方返回的上限：修复前借出方会被校验卡住（直到 releaseCheck，最长 10s），修复后远小于这个值
+     */
+    private static final long BORROW_WAIT_MS = 1000L;
 
     private final CountDownLatch checkStarted = new CountDownLatch(1);
     private final CountDownLatch releaseCheck = new CountDownLatch(1);
     private final AtomicBoolean blockFirstCheck = new AtomicBoolean(true);
     private volatile MockConnection checkingConnection;
+    /**
+     * 校验 SQL 已进入、尚未放行
+     */
+    private volatile boolean checkInProgress;
+    private volatile long checkStartNanos;
+    private volatile long checkEndNanos;
 
     private MockJDBCDriver driver;
     private Hqcp pool;
@@ -52,11 +66,16 @@ class HqcpMonitorCheckTest {
                 public ResultSet executeQuery(String sql) throws SQLException {
                     if (CHECK_SQL.equals(sql) && blockFirstCheck.compareAndSet(true, false)) {
                         checkingConnection = SlowCheckConnection.this;
+                        checkStartNanos = System.nanoTime();
+                        checkInProgress = true;
                         checkStarted.countDown();
                         try {
                             releaseCheck.await(10, TimeUnit.SECONDS);
                         } catch (InterruptedException e) {
                             Thread.currentThread().interrupt();
+                        } finally {
+                            checkInProgress = false;
+                            checkEndNanos = System.nanoTime();
                         }
                     }
                     return super.executeQuery(sql);
@@ -103,11 +122,13 @@ class HqcpMonitorCheckTest {
         config.setCheckoutTimeoutMillisec(CHECKOUT_TIMEOUT_MS);
         config.setCheckStatement(CHECK_SQL);
         config.setJmxLevel(0);
-        // setter 下限 10s，这里直接改字段，让空闲连接 2s 后即到检测时间，避免长 sleep；
-        // 同时 monitor 等校验结果的上限也是 idleTimeout（2s），远大于本测试卡住校验的时长（约 checkoutTimeout）
+        // setter 下限 10s，这里直接改字段，让空闲连接 2s 后即到检测时间，避免长 sleep。
+        // monitor 等校验结果的上限也是 idleTimeout（2s）：超过它校验会被判失败、连接被关闭。
+        // testBorrowDuringSlowCheckTimesOutWithinCheckoutTimeout 卡住校验的窗口约为 checkoutTimeout（200ms）
+        // 加调度开销，本机实测约 0.2s，余量约 1.8s（窗口的 8 倍以上）
         Field idleTimeoutField = HqcpConfig.class.getDeclaredField("idleTimeoutSec");
         idleTimeoutField.setAccessible(true);
-        idleTimeoutField.setLong(config, 2L);
+        idleTimeoutField.setLong(config, IDLE_TIMEOUT_SEC);
         return new Hqcp(config);
     }
 
@@ -131,14 +152,15 @@ class HqcpMonitorCheckTest {
         MockConnection got;
         try {
             // 校验仍被卡着；修复前借出方会一直卡在连接锁上，直到校验结束
-            got = borrowed.get(CHECKOUT_TIMEOUT_MS * 2, TimeUnit.MILLISECONDS);
+            got = borrowed.get(BORROW_WAIT_MS, TimeUnit.MILLISECONDS);
         } catch (TimeoutException e) {
-            fail("borrower blocked by monitor check longer than checkoutTimeout");
+            fail("borrower blocked by monitor check longer than " + BORROW_WAIT_MS + " ms");
             return;
         }
         assertNotNull(got);
         assertNotSame(checkingConnection, got, "must not get the connection under checking");
-        assertEquals(1, releaseCheck.getCount(), "check should still be in progress while borrowing");
+        // 由校验 SQL 侧记录：借出方返回时，校验 SQL 仍在执行、未被放行
+        assertTrue(checkInProgress, "check should still be in progress while borrowing");
     }
 
     /**
@@ -157,10 +179,10 @@ class HqcpMonitorCheckTest {
             }
         });
         try {
-            borrowed.get(CHECKOUT_TIMEOUT_MS * 2, TimeUnit.MILLISECONDS);
+            borrowed.get(BORROW_WAIT_MS, TimeUnit.MILLISECONDS);
             fail("the only connection is under checking, borrower should time out");
         } catch (TimeoutException e) {
-            fail("borrower blocked by monitor check longer than checkoutTimeout");
+            fail("borrower blocked by monitor check longer than " + BORROW_WAIT_MS + " ms");
         } catch (ExecutionException e) {
             assertInstanceOf(SQLException.class, e.getCause());
             assertTrue(e.getCause().getMessage().startsWith("Timeout on waiting for an available connection"),
@@ -172,7 +194,10 @@ class HqcpMonitorCheckTest {
         // 校验结束 → 连接放回空闲栈并唤醒等待方
         releaseCheck.countDown();
         try (Connection conn = pool.getConnection()) {
-            assertSame(checkingConnection, conn.unwrap(MockConnection.class));
+            // 校验被卡住的窗口须短于 idleTimeout，否则 monitor 判校验失败并关闭连接，这里会拿到重建的物理连接
+            long windowMs = TimeUnit.NANOSECONDS.toMillis(checkEndNanos - checkStartNanos);
+            assertSame(checkingConnection, conn.unwrap(MockConnection.class),
+                    "check window " + windowMs + " ms, limit " + IDLE_TIMEOUT_SEC * 1000 + " ms");
         }
         assertEquals(1, pool.getActiveConnectionsCount());
     }

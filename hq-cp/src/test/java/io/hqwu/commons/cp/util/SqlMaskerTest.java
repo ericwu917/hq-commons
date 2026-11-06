@@ -4,6 +4,8 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 
+import java.net.URL;
+import java.net.URLClassLoader;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashSet;
@@ -14,6 +16,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -915,6 +918,48 @@ class SqlMaskerTest {
             assertTrue(after.size() <= 10, "too many new parser threads: " + after.size());
             for (Thread t : parserThreads()) {
                 assertTrue(t.isDaemon(), t.getName() + " should be daemon");
+            }
+        }
+
+        /**
+         * 解析线程不继承触发它的业务线程的 inheritable ThreadLocal 与 context ClassLoader
+         */
+        @Test
+        void testParserThreadDoesNotInheritCallerContext() throws Exception {
+            InheritableThreadLocal<String> itl = new InheritableThreadLocal<>();
+            AtomicReference<Thread> parserThread = new AtomicReference<>();
+            AtomicReference<String> seenItl = new AtomicReference<>("unset");
+            AtomicReference<ClassLoader> seenTccl = new AtomicReference<>();
+            AtomicReference<String> masked = new AtomicReference<>();
+            CountDownLatch done = new CountDownLatch(1);
+            try (URLClassLoader appLoader = new URLClassLoader(new URL[0], null)) {
+                Thread caller = new Thread(() -> {
+                    itl.set("caller-value");
+                    Thread.currentThread().setContextClassLoader(appLoader);
+                    // 直接在工厂产出的线程上断言：共享池里的线程可能早已建好，触发脱敏不一定会新建线程
+                    Thread t = SqlMasker.newParserThread(() -> {
+                        seenItl.set(itl.get());
+                        seenTccl.set(Thread.currentThread().getContextClassLoader());
+                        done.countDown();
+                    });
+                    parserThread.set(t);
+                    t.start();
+                    // 经共享池脱敏一次：此时池里的线程也都不应持有 appLoader
+                    masked.set(sqlMasker.maskSensitiveFields("UPDATE users SET password = 'new_password' WHERE id = 1"));
+                });
+                caller.start();
+                caller.join(TimeUnit.SECONDS.toMillis(30));
+                assertFalse(caller.isAlive());
+                assertTrue(done.await(10, TimeUnit.SECONDS));
+
+                assertEquals("UPDATE users SET password = 'new_****word' WHERE id = 1", masked.get());
+                assertNull(seenItl.get(), "parser thread should not inherit InheritableThreadLocal");
+                assertSame(SqlMasker.class.getClassLoader(), seenTccl.get());
+                assertTrue(parserThread.get().isDaemon());
+                assertTrue(parserThread.get().getName().startsWith(SqlMasker.PARSER_THREAD_PREFIX));
+                for (Thread t : parserThreads()) {
+                    assertSame(SqlMasker.class.getClassLoader(), t.getContextClassLoader(), t.getName());
+                }
             }
         }
 

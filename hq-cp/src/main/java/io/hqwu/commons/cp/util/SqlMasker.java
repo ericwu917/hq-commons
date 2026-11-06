@@ -115,11 +115,20 @@ public class SqlMasker {
      * 与 {@link Executors#newCachedThreadPool()} 相同的伸缩方式：并发脱敏各占一个线程、不被串行化，
      * 某次解析超时卡住也不影响其他调用；线程空闲 60s 回收；daemon 线程，不阻止 JVM 退出
      */
-    private static final ExecutorService PARSER_EXECUTOR = Executors.newCachedThreadPool(r -> {
-        Thread t = new Thread(r, PARSER_THREAD_PREFIX + PARSER_THREAD_NO.incrementAndGet());
+    private static final ExecutorService PARSER_EXECUTOR = Executors.newCachedThreadPool(SqlMasker::newParserThread);
+
+    /**
+     * 解析线程工厂。<br/>
+     * 池是类级共享、从不 shutdown 的，线程由哪个业务线程触发创建并不确定：
+     * 不继承调用线程的 inheritable ThreadLocal，context ClassLoader 固定为本类的 ClassLoader，
+     * 避免共享 lib 部署时解析线程钉住某个（可能已卸载的）应用的 ClassLoader
+     */
+    static Thread newParserThread(Runnable r) {
+        Thread t = new Thread(null, r, PARSER_THREAD_PREFIX + PARSER_THREAD_NO.incrementAndGet(), 0, false);
+        t.setContextClassLoader(SqlMasker.class.getClassLoader());
         t.setDaemon(true);
         return t;
-    });
+    }
 
     /**
      * 脱敏模式，如"***", "####", "????", "*#?●○"
