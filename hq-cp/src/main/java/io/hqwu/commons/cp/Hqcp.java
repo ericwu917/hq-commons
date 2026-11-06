@@ -341,7 +341,7 @@ public class Hqcp implements HqcpMBean {
         PooledConnection pconn = validConnectionsPool.get(connId);
         try {
             Connection conn = pconn.checkOut(autoCommit);
-            if (config.isVerbose() || config.isPrintSql()) {
+            if ((config.isVerbose() || config.isPrintSql()) && LOGGER.isDebugEnabled()) {
                 LOGGER.debug(pconn.getConnectionName(), ".getConnection(", autoCommit, "), use ", Formatter.formatNS(System.nanoTime() - start), " ns");
             }
             return conn;

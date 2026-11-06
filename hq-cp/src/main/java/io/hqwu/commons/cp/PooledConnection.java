@@ -10,6 +10,7 @@ import lombok.RequiredArgsConstructor;
 import lombok.Setter;
 import org.apache.commons.lang3.ArrayUtils;
 
+import java.lang.reflect.Constructor;
 import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
@@ -123,6 +124,11 @@ public class PooledConnection implements PooledConnectionMBean {
     private final ReentrantLock operLock = new ReentrantLock();
 
     private volatile boolean autoCommit = false;
+
+    /**
+     * 缓存的连接代理类构造器，见 {@link #buildProxy()}
+     */
+    private volatile ProxyConstructor proxyConstructor;
 
     private boolean dirty = false;
 
@@ -301,8 +307,26 @@ public class PooledConnection implements PooledConnectionMBean {
     }
 
     private Connection buildProxy() {
-        return (Connection) Proxy.newProxyInstance(real_connection.getClass().getClassLoader(), new Class[]{Connection.class}, new ConnectionHandler(this));
+        ClassLoader loader = real_connection.getClass().getClassLoader();
+        ProxyConstructor cached = proxyConstructor;
+        try {
+            if (cached == null || cached.loader() != loader) {
+                // 首次（或重连后真实连接换了 ClassLoader）走 Proxy.newProxyInstance 取得代理类，缓存其构造器
+                Class<?> proxyClass = Proxy.newProxyInstance(loader, new Class[]{Connection.class}, new ConnectionHandler(this)).getClass();
+                cached = new ProxyConstructor(loader, proxyClass.getConstructor(InvocationHandler.class));
+                proxyConstructor = cached;
+            }
+            return (Connection) cached.constructor().newInstance(new ConnectionHandler(this));
+        } catch (ReflectiveOperationException e) {
+            throw new IllegalStateException("failed to build connection proxy of " + connectionName, e);
+        }
     }
+
+    /**
+     * 代理类构造器缓存：与 {@code Proxy.newProxyInstance(loader, {Connection.class}, h)} 生成的是同一个代理类，
+     * 省掉每次 checkOut 时按 ClassLoader + 接口查找代理类的开销
+     */
+    private record ProxyConstructor(ClassLoader loader, Constructor<?> constructor) {}
 
     public String toString() {
         return connectionName + "{" + real_connection + "}";
@@ -364,7 +388,7 @@ public class PooledConnection implements PooledConnectionMBean {
                     if (isFatalExceptionHappened()) { //Statement执行发生错误，需要关闭物理链接，shenjl
                         close();
                     }
-                    if (isPrintSQL() || isVerbose()) {
+                    if ((isPrintSQL() || isVerbose()) && log.isDebugEnabled()) {
                         log.debug(connectionName, ".close()[", isFatalExceptionHappened(), "] use ", Formatter.formatNS(System.nanoTime() - invokeStart), " ns");
                     }
                 }
@@ -460,13 +484,14 @@ public class PooledConnection implements PooledConnectionMBean {
             }
             dirty = false;
         }
-        //回收活动的语句
-        for (Object obj : activeStatementsPool.entrySet().toArray()) {
-            Map.Entry<Integer, PooledStatement> entry = (Map.Entry<Integer, PooledStatement>) obj;
-            PooledStatement pstmt = entry.getValue();
-            pstmt.getProxy().close();
-            if (isVerbose()) { //add by wuhq 2011.09.02
-                log.debug(pstmt.getStatementName(), " force to close.");
+        //回收活动的语句（常见情况下语句都已关闭，空表时跳过快照，免得每次归还都扫一遍哈希桶）
+        if (! activeStatementsPool.isEmpty()) {
+            // close 会从 activeStatementsPool 移除自身，故先取快照再遍历
+            for (PooledStatement pstmt : activeStatementsPool.values().toArray(new PooledStatement[0])) {
+                pstmt.getProxy().close();
+                if (isVerbose()) { //add by wuhq 2011.09.02
+                    log.debug(pstmt.getStatementName(), " force to close.");
+                }
             }
         }
         connectionPool.checkIn(this);
