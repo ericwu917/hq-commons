@@ -135,4 +135,17 @@ class HqcpDataSourceBootTest {
         // 验证实例不为空
         assertNotNull(dataSource);
     }
+
+    @Test
+    void testAfterPropertiesSet_WithPasswordDecryptor() throws Exception {
+        var basicProperties = new DataSourceProperties();
+        basicProperties.setPassword("vault:v1:basic");
+        basicProperties.setUrl("jdbc:mysql://basic:3306/db");
+
+        var dataSource = new HqcpDataSourceBoot(basicProperties, null, p -> "plain-of-" + p);
+        dataSource.afterPropertiesSet();
+
+        // 回退到基础属性的口令同样交给解密器
+        assertThat(dataSource.getPassword()).isEqualTo("plain-of-vault:v1:basic");
+    }
 }

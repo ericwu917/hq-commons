@@ -2,6 +2,7 @@ package io.hqwu.commons.cp.autoconfigure;
 
 import io.hqwu.commons.cp.HqcpDataSource;
 import io.hqwu.commons.cp.HqcpDataSourceBoot;
+import io.hqwu.commons.cp.PasswordDecryptor;
 import io.hqwu.commons.security.SecurityService;
 import io.hqwu.commons.security.SecurityServiceLocalImpl;
 import io.hqwu.commons.util.Logger;
@@ -29,6 +30,9 @@ import java.util.stream.Collectors;
  * </ul>
  * 该配置类在 {@link DataSourceAutoConfiguration} 之前运行，
  * 旨在根据 {@link DataSourceProperties} 和可用的 {@link SecurityService} 装配 {@link HqcpDataSource}。
+ * <p>
+ * 上下文中有 {@link PasswordDecryptor} bean 时注入数据源，取代内置 AES 口令解密
+ * （多个且无 {@code @Primary} 时由 Spring 报错）。
  *
  * @author taige (Wu, Hongqiang)
  * @since 2026-09-12
@@ -41,10 +45,11 @@ public class HqcpDataSourceAutoConfiguration {
 
     @Bean(initMethod = "init")
     @ConditionalOnMissingBean
-    public DataSource dataSource(DataSourceProperties basicProperties, ObjectProvider<SecurityService> securityServiceProvider) {
+    public DataSource dataSource(DataSourceProperties basicProperties, ObjectProvider<SecurityService> securityServiceProvider,
+                                 ObjectProvider<PasswordDecryptor> passwordDecryptorProvider) {
         LOGGER.debug("init HqcpDataSource");
         SecurityService selectedService = selectPreferRemote(securityServiceProvider);
-        return new HqcpDataSourceBoot(basicProperties, selectedService);
+        return new HqcpDataSourceBoot(basicProperties, selectedService, passwordDecryptorProvider.getIfAvailable());
     }
 
     /**

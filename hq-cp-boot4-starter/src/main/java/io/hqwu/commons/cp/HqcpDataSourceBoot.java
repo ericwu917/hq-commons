@@ -16,6 +16,7 @@ import org.springframework.boot.jdbc.autoconfigure.DataSourceProperties;
  *   <li>支持通过 {@code spring.datasource.hqcp} 前缀绑定自定义配置属性。</li>
  *   <li>在未定义特定属性时，自动回退到 {@link DataSourceProperties} 提供的标准 Spring 数据源配置。</li>
  *   <li>集成 {@link SecurityService} 以支持数据库凭据的安全处理（如密码解密）。</li>
+ *   <li>支持注入 {@link PasswordDecryptor}，注入后取代内置 AES 口令解密。</li>
  *   <li>管理数据源的生命周期，负责容器启动时的初始化与关闭时的资源释放。</li>
  * </ul>
  *
@@ -27,14 +28,21 @@ public class HqcpDataSourceBoot extends HqcpDataSource implements InitializingBe
 
     private final DataSourceProperties basicProperties;
     private final SecurityService securityService;
+    private final PasswordDecryptor passwordDecryptor;
 
     public HqcpDataSourceBoot(DataSourceProperties basicProperties) {
         this(basicProperties, null);
     }
 
     public HqcpDataSourceBoot(DataSourceProperties basicProperties, SecurityService securityService) {
+        this(basicProperties, securityService, null);
+    }
+
+    public HqcpDataSourceBoot(DataSourceProperties basicProperties, SecurityService securityService,
+                              PasswordDecryptor passwordDecryptor) {
         this.basicProperties = basicProperties;
         this.securityService = securityService;
+        this.passwordDecryptor = passwordDecryptor;
     }
 
     @Override
@@ -42,6 +50,10 @@ public class HqcpDataSourceBoot extends HqcpDataSource implements InitializingBe
         // 注入 SecurityService
         if (this.securityService != null) {
             super.setSecurityService(this.securityService);
+        }
+        // 注入 PasswordDecryptor，须在下面首次 getPassword()（触发惰性解密）之前
+        if (this.passwordDecryptor != null) {
+            super.setPasswordDecryptor(this.passwordDecryptor);
         }
 
         // if not found prefix 'spring.datasource.hqcp' jdbc properties,

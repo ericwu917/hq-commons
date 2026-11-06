@@ -5,6 +5,7 @@ import io.hqwu.commons.cp.util.SqlMasker;
 import io.hqwu.commons.security.SecurityService;
 import io.hqwu.commons.security.SecurityServiceLocalImpl;
 import org.junit.jupiter.api.Test;
+import org.springframework.beans.factory.NoUniqueBeanDefinitionException;
 import org.springframework.boot.autoconfigure.AutoConfigurations;
 import org.springframework.boot.jdbc.autoconfigure.DataSourceAutoConfiguration;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
@@ -227,6 +228,66 @@ class HqcpDataSourceAutoConfigurationTest {
                     var dataSource = context.getBean(HqcpDataSourceBoot.class);
                     assertThat(dataSource).isNotNull();
                 });
+    }
+
+    @Test
+    void testPasswordDecryptorBeanUsed() {
+        this.contextRunner
+                .withUserConfiguration(PasswordDecryptorConfiguration.class)
+                .withPropertyValues(
+                        "spring.datasource.url=jdbc:mysql://localhost:3306/test",
+                        "spring.datasource.driver-class-name=com.mysql.cj.jdbc.Driver",
+                        "spring.datasource.hqcp.password=vault:v1:cipher"
+                )
+                .run(context -> {
+                    assertThat(context).hasNotFailed();
+                    var dataSource = context.getBean(HqcpDataSourceBoot.class);
+                    assertThat(dataSource.getPassword()).isEqualTo("plain-of-vault:v1:cipher");
+                });
+    }
+
+    @Test
+    void testPasswordDecryptorFailureFailsStartup() {
+        this.contextRunner
+                .withUserConfiguration(FailingPasswordDecryptorConfiguration.class)
+                .withPropertyValues(
+                        "spring.datasource.url=jdbc:mysql://localhost:3306/test",
+                        "spring.datasource.hqcp.password=vault:v1:cipher"
+                )
+                .run(context -> {
+                    assertThat(context).hasFailed();
+                    assertThat(context.getStartupFailure()).rootCause()
+                            .isInstanceOf(IllegalStateException.class).hasMessage("decrypt failed");
+                });
+    }
+
+    @Test
+    void testMultiplePasswordDecryptorsFailStartup() {
+        this.contextRunner
+                .withUserConfiguration(PasswordDecryptorConfiguration.class, FailingPasswordDecryptorConfiguration.class)
+                .withPropertyValues("spring.datasource.url=jdbc:mysql://localhost:3306/test")
+                .run(context -> {
+                    assertThat(context).hasFailed();
+                    assertThat(context.getStartupFailure()).hasRootCauseInstanceOf(NoUniqueBeanDefinitionException.class);
+                });
+    }
+
+    @Configuration
+    static class PasswordDecryptorConfiguration {
+        @Bean
+        public PasswordDecryptor passwordDecryptor() {
+            return p -> "plain-of-" + p;
+        }
+    }
+
+    @Configuration
+    static class FailingPasswordDecryptorConfiguration {
+        @Bean
+        public PasswordDecryptor failingPasswordDecryptor() {
+            return p -> {
+                throw new IllegalStateException("decrypt failed");
+            };
+        }
     }
 
     /**

@@ -58,7 +58,7 @@ public class HqcpConfig implements HqcpConfigMBean {
      */
     private String password;
     /**
-     * 解密的口令
+     * 解密的口令，首次 {@link #getPassword()} 时惰性解密并缓存，{@link #setPassword(String)} 时清空
      */
     private String decPassword;
 
@@ -300,6 +300,11 @@ public class HqcpConfig implements HqcpConfigMBean {
     @Setter
     private volatile SecurityService securityService;
 
+    /**
+     * 口令解密器，注入后完全取代内置 AES 启发式解密
+     */
+    private volatile PasswordDecryptor passwordDecryptor;
+
     /*
      * default login timeout 10 seconds
      */
@@ -406,18 +411,43 @@ public class HqcpConfig implements HqcpConfigMBean {
     }
 
     /**
-     * 获取密码，若已解密则返回解密后的密码，否则返回初始密码。
-     * 若密码为空，则返回 null。
+     * 获取用于连库的口令，首次调用时惰性解密并缓存。
+     * <ul>
+     *   <li>口令为空返回 null；</li>
+     *   <li>注入了 {@link PasswordDecryptor} 时用它解密：其异常原样外抛，返回 null 或空串时抛 {@link IllegalStateException}；</li>
+     *   <li>否则走内置 AES 启发式解密，非密文或解密失败时返回初始口令。</li>
+     * </ul>
      * @return 解密后的密码或初始密码
      */
     String getPassword() {
-        if (StringUtil.isEmpty(this.password)) {
+        String rawPassword = this.password;
+        if (StringUtil.isEmpty(rawPassword)) {
             return null;
         }
-        if (this.decPassword != null) {
-            return this.decPassword;
+        String plainPassword = this.decPassword;
+        if (plainPassword == null) {
+            PasswordDecryptor decryptor = this.passwordDecryptor;
+            if (decryptor != null) {
+                plainPassword = decryptor.decrypt(rawPassword);
+                if (StringUtil.isEmpty(plainPassword)) {
+                    throw new IllegalStateException("PasswordDecryptor " + decryptor.getClass().getName()
+                            + " returned null or empty password");
+                }
+            } else {
+                plainPassword = decryptPassword(rawPassword);
+            }
+            this.decPassword = plainPassword;
         }
-        return this.password;
+        return plainPassword;
+    }
+
+    /**
+     * 注入口令解密器，注入后完全取代内置 AES 启发式解密；已缓存的解密结果随之作废。
+     * @param passwordDecryptor 口令解密器，null 表示恢复内置解密
+     */
+    public void setPasswordDecryptor(PasswordDecryptor passwordDecryptor) {
+        this.passwordDecryptor = passwordDecryptor;
+        this.decPassword = null;
     }
 
     /**
@@ -449,7 +479,8 @@ public class HqcpConfig implements HqcpConfigMBean {
     }
 
     /**
-     * 设置加密或未加密的密码，并在初始化时进行解密处理。
+     * 设置加密或未加密的密码，只保存原值，解密推迟到首次 {@link #getPassword()}，
+     * 因此与 {@code passwordKey} / {@link SecurityService} / {@link PasswordDecryptor} 的设置先后无关。
      * 如果密码为空，则直接返回，不进行后续处理。
      * @param password 用户提供的密码，可能为加密或明文形式
      */
@@ -458,8 +489,7 @@ public class HqcpConfig implements HqcpConfigMBean {
             return;
         }
         this.password = password;
-        // 调用解密方法，初始化时完成解密，确保后续调用直接返回结果
-        this.decPassword = decryptPassword(password);
+        this.decPassword = null;
     }
 
     public void setMinConnections(int minConnections) {
@@ -563,12 +593,24 @@ public class HqcpConfig implements HqcpConfigMBean {
     //    this.useOracleImplicitCache = useOracleImplicitPSCache;
     // }
 
+    /**
+     * 设置内置 AES 解密口令用的密钥（{@code jdbc.password-key}）。
+     * <p>未设置时依次取系统属性、环境变量 {@code JDBC_SECRET_KEY}，都没有则回落到内置默认密钥。
+     * <b>内置默认密钥回落已标记废弃，将在后续版本移除</b>，请配置独立密钥或注入 {@link PasswordDecryptor}。</p>
+     * @param passwordAesKey 密钥，空白时忽略
+     */
     public void setPasswordKey(String passwordAesKey) {
         if (StringUtil.isNotBlank(passwordAesKey)) {
             this.passwordKey = passwordAesKey;
         }
     }
 
+    /**
+     * 取内置 AES 解密口令用的密钥：{@code jdbc.password-key} → 系统属性 {@code JDBC_SECRET_KEY}
+     * → 环境变量 {@code JDBC_SECRET_KEY} → 内置默认密钥。结果缓存在实例上。
+     * <p><b>内置默认密钥回落已标记废弃，将在后续版本移除</b>；命中时打一次 WARN。</p>
+     * @return 密钥
+     */
     String getPasswordKey() {
         if (this.passwordKey != null) {
             return this.passwordKey;
@@ -578,6 +620,9 @@ public class HqcpConfig implements HqcpConfigMBean {
             masteryKey = System.getenv("JDBC_SECRET_KEY");
         }
         if (masteryKey == null) {
+            // 结果会缓存到 passwordKey，同一实例只会走到这里一次
+            LOGGER.warn("未配置 jdbc.password-key / JDBC_SECRET_KEY，回落到内置默认密钥：用它加密的口令等同明文，"
+                    + "该回落将在后续版本移除，建议配置独立密钥或注入 PasswordDecryptor");
             masteryKey = "eyGDTxVGdmJW7YMYclvWzPMGct4j0syHAdWEB3luYCk=";
         }
         this.passwordKey = masteryKey;
@@ -739,10 +784,10 @@ public class HqcpConfig implements HqcpConfigMBean {
         if (logger == null) {
             logger = LOGGER;
         }
-        getPassword();  // decide if password encrypted
         logger.info("url                     = '" + url + "'");
         logger.info("username                = '" + username + "'");
-        logger.info("password                = '" + (decPassword == null ? "******" : password) + "'");
+        // 口令一律不打（明文、密文都不打），与是否配置、是否加密无关
+        logger.info("password                = '******'");
         logger.info("minConnections          = " + minConnections);
         logger.info("maxConnections          = " + maxConnections);
         logger.info("maxStatements           = " + maxStatements);

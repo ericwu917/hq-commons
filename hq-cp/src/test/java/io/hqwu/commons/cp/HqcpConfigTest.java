@@ -1,5 +1,8 @@
 package io.hqwu.commons.cp;
 
+import ch.qos.logback.classic.Level;
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
 import com.jolbox.bonecp.MockConstant;
 import com.jolbox.bonecp.MockJDBCDriver;
 import io.hqwu.commons.security.SecurityService;
@@ -8,12 +11,20 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
+import org.mockito.Mockito;
+import org.mockito.invocation.Invocation;
+import org.slf4j.LoggerFactory;
 import org.springframework.core.io.ClassPathResource;
 
+import java.nio.charset.StandardCharsets;
 import java.sql.SQLException;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Properties;
 
 import static org.junit.jupiter.api.Assertions.*;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
+import static org.mockito.Mockito.mock;
 
 /**
  * Created with IntelliJ IDEA for plat-arch-svn
@@ -852,5 +863,181 @@ public class HqcpConfigTest {
 
         assertNotNull(service);
         assertTrue(service instanceof SecurityServiceLocalImpl);
+    }
+
+    /**
+     * 用新生成的独立密钥加密口令，返回 {密钥, 密文}
+     */
+    private static String[] encryptWithNewKey(String plain) throws Exception {
+        SecurityService ss = new SecurityServiceLocalImpl();
+        String key = ss.generateKey("AES", 128);
+        String cipher = ss.encryptByAES(plain.getBytes(StandardCharsets.UTF_8), key, "CBC");
+        return new String[] {key, cipher};
+    }
+
+    /**
+     * 收集 mock Logger 上所有调用的参数文本
+     */
+    private static String loggedText(io.hqwu.commons.util.Logger logger) {
+        StringBuilder sb = new StringBuilder();
+        for (Invocation invocation : Mockito.mockingDetails(logger).getInvocations()) {
+            for (Object arg : invocation.getArguments()) {
+                sb.append(arg).append('\n');
+            }
+        }
+        return sb.toString();
+    }
+
+    @Test
+    public void testPrintConfigHidesPlainPassword() {
+        config.setUrl("jdbc:mysql://localhost/test");
+        config.setUsername("test");
+        config.setPassword("myPlainSecret");
+
+        io.hqwu.commons.util.Logger logger = mock(io.hqwu.commons.util.Logger.class);
+        config.printConfig(logger);
+
+        String text = loggedText(logger);
+        assertFalse(text.contains("myPlainSecret"));
+        assertTrue(text.contains("password                = '******'"));
+    }
+
+    @Test
+    public void testPrintConfigHidesEncryptedPassword() throws Exception {
+        String[] keyAndCipher = encryptWithNewKey("myCipherSecret");
+        config.setUrl("jdbc:mysql://localhost/test");
+        config.setPassword(keyAndCipher[1]);
+        config.setPasswordKey(keyAndCipher[0]);
+        assertEquals("myCipherSecret", config.getPassword());
+
+        io.hqwu.commons.util.Logger logger = mock(io.hqwu.commons.util.Logger.class);
+        config.printConfig(logger);
+
+        String text = loggedText(logger);
+        assertFalse(text.contains("myCipherSecret"));
+        assertFalse(text.contains(keyAndCipher[1]));
+        assertTrue(text.contains("password                = '******'"));
+    }
+
+    @Test
+    public void testPrintConfigWithoutPassword() {
+        io.hqwu.commons.util.Logger logger = mock(io.hqwu.commons.util.Logger.class);
+        config.printConfig(logger);
+        assertTrue(loggedText(logger).contains("password                = '******'"));
+    }
+
+    @Test
+    public void testPasswordKeySetAfterPassword() throws Exception {
+        String[] keyAndCipher = encryptWithNewKey("orderSecret");
+        config.setPassword(keyAndCipher[1]);
+        config.setPasswordKey(keyAndCipher[0]);
+        assertEquals("orderSecret", config.getPassword());
+        assertEquals("orderSecret", config.getConnectionProperties().getProperty("password"));
+    }
+
+    @Test
+    public void testPasswordKeyFromPropertiesAfterPassword() throws Exception {
+        // setProperties 里 jdbc.password 先于 jdbc.password-key 设置
+        String[] keyAndCipher = encryptWithNewKey("propSecret");
+        prop.setProperty("jdbc.password", keyAndCipher[1]);
+        prop.setProperty("jdbc.password-key", keyAndCipher[0]);
+        config.setProperties(prop);
+        assertEquals("propSecret", config.getPassword());
+    }
+
+    @Test
+    public void testPasswordDecryptorUsed() {
+        List<String> inputs = new ArrayList<>();
+        config.setPasswordDecryptor(p -> {
+            inputs.add(p);
+            return "decrypted-" + p;
+        });
+        config.setPassword("vault:v1:abc");
+
+        assertEquals("decrypted-vault:v1:abc", config.getPassword());
+        assertEquals("decrypted-vault:v1:abc", config.getPassword());
+        assertEquals(List.of("vault:v1:abc"), inputs, "解密结果应缓存，只调用一次");
+
+        // 二次 setPassword 会重新解密
+        config.setPassword("vault:v1:def");
+        assertEquals("decrypted-vault:v1:def", config.getPassword());
+        assertEquals(List.of("vault:v1:abc", "vault:v1:def"), inputs);
+    }
+
+    @Test
+    public void testPasswordDecryptorReplacesBuiltinAes() throws Exception {
+        String[] keyAndCipher = encryptWithNewKey("aesSecret");
+        config.setPassword(keyAndCipher[1]);
+        config.setPasswordKey(keyAndCipher[0]);
+        assertEquals("aesSecret", config.getPassword());
+
+        // 注入后作废已缓存的结果，改由解密器处理原值
+        config.setPasswordDecryptor(p -> "fromDecryptor");
+        assertEquals("fromDecryptor", config.getPassword());
+
+        // 置回 null 恢复内置解密
+        config.setPasswordDecryptor(null);
+        assertEquals("aesSecret", config.getPassword());
+    }
+
+    @Test
+    public void testPasswordDecryptorExceptionPropagates() {
+        IllegalArgumentException boom = new IllegalArgumentException("boom");
+        config.setPasswordDecryptor(p -> {
+            throw boom;
+        });
+        config.setPassword("vault:v1:abc");
+        assertSame(boom, assertThrows(IllegalArgumentException.class, () -> config.getPassword()));
+    }
+
+    @Test
+    public void testPasswordDecryptorReturnsNullOrEmpty() {
+        config.setPassword("vault:v1:topSecretCipher");
+
+        config.setPasswordDecryptor(p -> null);
+        IllegalStateException e1 = assertThrows(IllegalStateException.class, () -> config.getPassword());
+        assertFalse(e1.getMessage().contains("topSecretCipher"));
+
+        config.setPasswordDecryptor(p -> "");
+        IllegalStateException e2 = assertThrows(IllegalStateException.class, () -> config.getPassword());
+        assertFalse(e2.getMessage().contains("topSecretCipher"));
+    }
+
+    @Test
+    public void testPasswordDecryptorNotCalledForEmptyPassword() {
+        config.setPasswordDecryptor(p -> {
+            throw new AssertionError("should not be called");
+        });
+        assertNull(config.getPassword());
+    }
+
+    @Test
+    public void testDefaultPasswordKeyFallbackWarns() {
+        assumeTrue(System.getenv("JDBC_SECRET_KEY") == null, "环境变量 JDBC_SECRET_KEY 已设置，走不到内置默认密钥");
+        String originalKey = System.getProperty("JDBC_SECRET_KEY");
+        ch.qos.logback.classic.Logger logbackLogger =
+                (ch.qos.logback.classic.Logger) LoggerFactory.getLogger(HqcpConfig.class.getName());
+        Level originalLevel = logbackLogger.getLevel();
+        ListAppender<ILoggingEvent> appender = new ListAppender<>();
+        appender.start();
+        logbackLogger.addAppender(appender);
+        logbackLogger.setLevel(Level.WARN);
+        try {
+            System.clearProperty("JDBC_SECRET_KEY");
+            HqcpConfig newConfig = new HqcpConfig();
+            assertEquals("eyGDTxVGdmJW7YMYclvWzPMGct4j0syHAdWEB3luYCk=", newConfig.getPasswordKey());
+            newConfig.getPasswordKey();
+
+            long warns = appender.list.stream()
+                    .filter(e -> e.getLevel() == Level.WARN && e.getFormattedMessage().contains("内置默认密钥"))
+                    .count();
+            assertEquals(1, warns, "同一实例只 WARN 一次");
+        } finally {
+            logbackLogger.detachAppender(appender);
+            logbackLogger.setLevel(originalLevel);
+            if (originalKey != null) {
+                System.setProperty("JDBC_SECRET_KEY", originalKey);
+            }
+        }
     }
 }
