@@ -169,7 +169,8 @@ public class PooledStatement implements InvocationHandler {
         } catch (Exception e) {
             if (methodDoing.startsWith("execute")) {
                 if (e instanceof SQLException) {
-                    LOGGER.info(e.toString(), "[ErrorCode=", ((SQLException) e).getErrorCode(), ";SQLState=", ((SQLException) e).getSQLState(), "] on ", methodDoing, "(", getMaskedSql(), ")");
+                    // 开启 SQL 掩码时不打驱动异常原文：如 MySQL 的 Duplicate entry '<唯一键值>' for key ... 带着数据值，SQL 掩码管不到
+                    LOGGER.info(isMaskSqlEnabled() ? e.getClass().getName() : e.toString(), "[ErrorCode=", ((SQLException) e).getErrorCode(), ";SQLState=", ((SQLException) e).getSQLState(), "] on ", methodDoing, "(", getMaskedSql(), ")");
                 } else {
                     // MySQL unexpected exception with mysql-connector-java:8.0.19:
                     // java.lang.NullPointerException: null
@@ -359,12 +360,15 @@ public class PooledStatement implements InvocationHandler {
     }
 
     String getMaskedSql() {
-        HqcpConfig config = pooledConnection.getConnectionPool().getConfig();
-        SqlMasker sqlMasker = pooledConnection.getConnectionPool().getSqlMasker();
-        if (config.isMaskSql() && sqlMasker != null) {
-            return sqlMasker.maskSensitiveFields(getSqlDoing());
+        if (isMaskSqlEnabled()) {
+            return pooledConnection.getConnectionPool().getSqlMasker().maskSensitiveFields(getSqlDoing());
         }
         return getSqlDoing();
+    }
+
+    private boolean isMaskSqlEnabled() {
+        return pooledConnection.getConnectionPool().getConfig().isMaskSql()
+                && pooledConnection.getConnectionPool().getSqlMasker() != null;
     }
 
     protected String getSqlDoing() {

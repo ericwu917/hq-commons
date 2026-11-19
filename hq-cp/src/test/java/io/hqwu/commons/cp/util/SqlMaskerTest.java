@@ -117,6 +117,54 @@ class SqlMaskerTest {
         }
 
         /**
+         * Covers: 3. INSERT ... SELECT 选择列按列清单对位掩码（FROM dual WHERE NOT EXISTS 的幂等写入）
+         */
+        @Test
+        void testInsertSelectLiteralItemsFromDual() {
+            String sql = "INSERT INTO users (id, name, password, email) SELECT 1, 'John', 'secret123', 'john@example.com' FROM dual"
+                    + " WHERE NOT EXISTS (SELECT 1 FROM users WHERE email = 'john@example.com')";
+            String expected = "INSERT INTO users (id, name, password, email) SELECT 1, 'John', 'sec****23', 'john********.com' FROM dual"
+                    + " WHERE NOT EXISTS (SELECT 1 FROM users WHERE email = 'john********.com')";
+            assertEquals(expected, sqlMasker.maskSensitiveFields(sql));
+        }
+
+        /**
+         * Covers: 3. INSERT ... SELECT 括号包裹与 UNION ALL 多分支，每个分支各自对位
+         */
+        @Test
+        void testInsertSelectUnionBranches() {
+            String sql = "INSERT INTO users (id, password) (SELECT 1, 'secret123' FROM dual UNION ALL SELECT 2, 'secret456' FROM dual)";
+            String expected = "INSERT INTO users (id, password) (SELECT 1, 'sec****23' FROM dual UNION ALL SELECT 2, 'sec****56' FROM dual)";
+            assertEquals(expected, sqlMasker.maskSensitiveFields(sql));
+        }
+
+        /**
+         * Covers: 3. INSERT ... SELECT 选择列里的子查询只由 maskSelectVisitor 遍历一次，值不被掩两次
+         */
+        @Test
+        void testInsertSelectSubqueryItemMaskedOnce() {
+            String sql = "INSERT INTO users (id, password) SELECT 1, (SELECT password FROM t WHERE password = 'secret123') FROM dual";
+            String expected = "INSERT INTO users (id, password) SELECT 1, (SELECT password FROM t WHERE password = 'sec****23') FROM dual";
+            assertEquals(expected, sqlMasker.maskSensitiveFields(sql));
+        }
+
+        /**
+         * Covers: 3. INSERT ... SELECT 没有列清单、选择列数对不上、SELECT * 时不对位，只掩 WHERE
+         */
+        @Test
+        void testInsertSelectWithoutPositionalMapping() {
+            String noColumns = "INSERT INTO users SELECT 1, 'secret123' FROM dual WHERE password = 'secret123'";
+            assertEquals("INSERT INTO users SELECT 1, 'secret123' FROM dual WHERE password = 'sec****23'",
+                    sqlMasker.maskSensitiveFields(noColumns));
+            String sizeMismatch = "INSERT INTO users (id, password) SELECT 'secret123' FROM dual WHERE password = 'secret123'";
+            assertEquals("INSERT INTO users (id, password) SELECT 'secret123' FROM dual WHERE password = 'sec****23'",
+                    sqlMasker.maskSensitiveFields(sizeMismatch));
+            String allColumns = "INSERT INTO users (password) SELECT * FROM t WHERE password = 'secret123'";
+            assertEquals("INSERT INTO users (password) SELECT * FROM t WHERE password = 'sec****23'",
+                    sqlMasker.maskSensitiveFields(allColumns));
+        }
+
+        /**
          * Covers: 4. INSERT ... ON DUPLICATE KEY UPDATE
          */
         @Test

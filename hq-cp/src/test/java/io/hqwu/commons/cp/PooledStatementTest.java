@@ -1,14 +1,21 @@
 package io.hqwu.commons.cp;
 
+import ch.qos.logback.classic.Level;
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
 import io.hqwu.commons.cp.util.SqlMasker;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.slf4j.LoggerFactory;
 
 import java.sql.Connection;
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.sql.SQLIntegrityConstraintViolationException;
 import java.sql.Statement;
+import java.util.List;
+import java.util.Set;
 
 import static org.easymock.EasyMock.*;
 import static org.junit.jupiter.api.Assertions.*;
@@ -1348,5 +1355,67 @@ class PooledStatementTest {
 
         // 验证sqlMasker.maskSensitiveFields被调用
         verify(mockPooledConnection, mockRealStatement, mockPool, mockConfig, mockMasker);
+    }
+
+    /**
+     * 开启 SQL 掩码时，失败日志不打驱动异常原文（MySQL Duplicate entry 消息里带唯一键值），只打类名 + ErrorCode + SQLState
+     */
+    @Test
+    void testFailureLogOmitsDriverMessageWhenMaskSqlEnabled() throws SQLException {
+        String message = failureLogOfDuplicateEntry(true);
+        assertFalse(message.contains("VC-0001-9876"), message);
+        assertFalse(message.contains("Duplicate entry"), message);
+        assertTrue(message.startsWith(SQLIntegrityConstraintViolationException.class.getName() + "[ErrorCode=1062;SQLState=23000]"), message);
+        assertTrue(message.contains("voucher_no"), message);
+    }
+
+    /**
+     * 未开启 SQL 掩码时，失败日志行为不变：照旧打驱动异常原文
+     */
+    @Test
+    void testFailureLogKeepsDriverMessageWhenMaskSqlDisabled() throws SQLException {
+        String message = failureLogOfDuplicateEntry(false);
+        assertTrue(message.startsWith(DUPLICATE_ENTRY.toString() + "[ErrorCode=1062;SQLState=23000]"), message);
+    }
+
+    private static final SQLException DUPLICATE_ENTRY = new SQLIntegrityConstraintViolationException(
+            "Duplicate entry 'VC-0001-9876' for key 'sales_voucher.uk_voucher_no'", "23000", 1062);
+
+    /**
+     * 让 execute 抛唯一键冲突，返回 PooledStatement 打出的那条失败日志
+     */
+    private String failureLogOfDuplicateEntry(boolean maskSql) throws SQLException {
+        String sql = "INSERT INTO sales_voucher (id, voucher_no) VALUES (1, 'VC-0001-9876')";
+        expect(mockRealStatement.getResultSetType()).andReturn(ResultSet.TYPE_FORWARD_ONLY).anyTimes();
+        expect(mockRealStatement.getResultSetConcurrency()).andReturn(ResultSet.CONCUR_READ_ONLY).anyTimes();
+        expect(mockPooledConnection.getConnectionPool()).andReturn(mockPool).anyTimes();
+        expect(mockPool.getConfig()).andReturn(mockConfig).anyTimes();
+        expect(mockConfig.isMaskSql()).andReturn(maskSql).anyTimes();
+        expect(mockPool.getSqlMasker()).andReturn(new SqlMasker("****", Set.of("voucher_no"))).anyTimes();
+        expect(mockRealStatement.execute(sql)).andThrow(DUPLICATE_ENTRY);
+        expect(mockPooledConnection.isFatalException(DUPLICATE_ENTRY)).andReturn(false);
+        replay(mockPooledConnection, mockRealStatement, mockConfig, mockPool);
+
+        ch.qos.logback.classic.Logger logbackLogger =
+                (ch.qos.logback.classic.Logger) LoggerFactory.getLogger(PooledStatement.class.getName());
+        Level originalLevel = logbackLogger.getLevel();
+        ListAppender<ILoggingEvent> appender = new ListAppender<>();
+        appender.start();
+        logbackLogger.addAppender(appender);
+        logbackLogger.setLevel(Level.INFO);
+        try {
+            Statement proxy = new PooledStatement(mockPooledConnection, mockRealStatement, 1).checkOut();
+            assertSame(DUPLICATE_ENTRY, assertThrows(SQLException.class, () -> proxy.execute(sql)));
+        } finally {
+            logbackLogger.detachAppender(appender);
+            logbackLogger.setLevel(originalLevel);
+        }
+        List<String> messages = appender.list.stream()
+                .filter(e -> e.getLevel() == Level.INFO)
+                .map(ILoggingEvent::getFormattedMessage)
+                .filter(m -> m.contains("ErrorCode="))
+                .toList();
+        assertEquals(1, messages.size(), messages.toString());
+        return messages.get(0);
     }
 }
