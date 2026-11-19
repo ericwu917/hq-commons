@@ -422,12 +422,44 @@ public class SqlMasker {
                     }
                 }
             } else if (select != null) {
-                //3. INSERT ... SELECT 语句
+                //3. INSERT ... SELECT 语句：选择列按 INSERT 列清单对位，其余（WHERE、子查询）交给 maskSelectVisitor
+                // ex. INSERT INTO t (id, password) SELECT 1, 'secret' FROM dual WHERE NOT EXISTS (...)
+                maskInsertSelectItems(insert.getColumns(), select);
                 select.accept(SqlMasker.this.maskSelectVisitor);
             }
             // 4. INSERT ... ON DUPLICATE KEY UPDATE（MySQL 特有）
             // ex. INSERT INTO table_name (id, password) VALUES (123, 'secret') ON DUPLICATE KEY UPDATE password = 'new_secret'
             maskUpdateSets(insert.getDuplicateUpdateSets());
+        }
+
+        /**
+         * INSERT ... SELECT 的选择列按 INSERT 列清单对位掩码（只掩字面量，与 VALUES 路径一致）。<br/>
+         *  - 括号包裹的 SELECT 解包；UNION 等集合操作每个分支各自对位 <br/>
+         *  - 没有列清单、或选择列数与列数对不上（含 SELECT *）时不对位 <br/>
+         *  - 选择列里的子查询不在这里处理，由 maskSelectVisitor 统一遍历，避免同一值被掩两次
+         * @param columns INSERT 列清单
+         * @param select  INSERT 的 SELECT 部分
+         */
+        private void maskInsertSelectItems(List<Column> columns, Select select) {
+            if (columns == null || columns.isEmpty()) {
+                return;
+            }
+            if (select instanceof ParenthesedSelect parenthesedSelect) {
+                maskInsertSelectItems(columns, parenthesedSelect.getSelect());
+            } else if (select instanceof SetOperationList setOpList) {
+                setOpList.getSelects().forEach(branch -> maskInsertSelectItems(columns, branch));
+            } else if (select instanceof PlainSelect plainSelect) {
+                List<SelectItem<?>> selectItems = plainSelect.getSelectItems();
+                if (selectItems.size() != columns.size()) {
+                    return;
+                }
+                for (int i = 0; i < columns.size(); i++) {
+                    Expression expression = selectItems.get(i).getExpression();
+                    if (! (expression instanceof Select)) {
+                        maskFieldValueIfSensitive(columns.get(i), expression);
+                    }
+                }
+            }
         }
 
         /**
