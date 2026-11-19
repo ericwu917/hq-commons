@@ -436,7 +436,8 @@ public class SqlMasker {
          * INSERT ... SELECT 的选择列按 INSERT 列清单对位掩码（只掩字面量，与 VALUES 路径一致）。<br/>
          *  - 括号包裹的 SELECT 解包；UNION 等集合操作每个分支各自对位 <br/>
          *  - 没有列清单、或选择列数与列数对不上（含 SELECT *）时不对位 <br/>
-         *  - 选择列里的子查询不在这里处理，由 maskSelectVisitor 统一遍历，避免同一值被掩两次
+         *  - 只掩直接放在选择列上的字面量（可带括号）；函数包裹、CASE、标量子查询选出的字面量，
+         *    以及 SELECT A.* FROM (SELECT ... UNION ALL ...) A 这类派生表里的字面量都不掩
          * @param columns INSERT 列清单
          * @param select  INSERT 的 SELECT 部分
          */
@@ -454,10 +455,7 @@ public class SqlMasker {
                     return;
                 }
                 for (int i = 0; i < columns.size(); i++) {
-                    Expression expression = selectItems.get(i).getExpression();
-                    if (! (expression instanceof Select)) {
-                        maskFieldValueIfSensitive(columns.get(i), expression);
-                    }
+                    maskFieldValueIfSensitive(columns.get(i), selectItems.get(i).getExpression());
                 }
             }
         }
